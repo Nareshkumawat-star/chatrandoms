@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   Timer, EyeOff, Flag, CornerUpLeft,
-  Pencil, Trash2, Send, X, Smile,
+  Pencil, Trash2, Send, X, Smile, Search,
 } from 'lucide-react';
 import { api, apiError } from '../lib/api';
 import { getGlobalSocket } from '../lib/socket';
@@ -35,6 +35,12 @@ export default function GlobalChat() {
   const [error, setError] = useState('');
   const [cooldownUntil, setCooldownUntil] = useState(0);
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQ, setSearchQ] = useState('');
+  const [searchResults, setSearchResults] = useState<GMsg[]>([]);
+  const [searchingMsgs, setSearchingMsgs] = useState(false);
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+  const [nextBefore, setNextBefore] = useState<string | null>(null);
 
   const endRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -51,7 +57,11 @@ export default function GlobalChat() {
     let cancelled = false;
     api.get('/global/messages?limit=60')
       .then(({ data }) => {
-        if (!cancelled) setMessages((data as { messages: GMsg[] }).messages);
+        if (!cancelled) {
+          const d = data as { messages: GMsg[]; nextBefore: string | null };
+          setMessages(d.messages);
+          setNextBefore(d.nextBefore);
+        }
       })
       .catch(() => setError('Could not load global messages'));
 
@@ -71,8 +81,14 @@ export default function GlobalChat() {
         setTimeout(() => setStorm((s) => s.filter((e) => e.id !== id)), 1500);
       }
     };
-    const onUpdated = (p: { messageId: string; text: string }) => {
-      setMessages((prev) => prev.map((m) => (m._id === p.messageId ? { ...m, text: p.text, isEdited: true } : m)));
+    const onUpdated = (p: { messageId: string; text: string; mentions?: GMsg['mentions'] }) => {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m._id === p.messageId
+            ? { ...m, text: p.text, mentions: p.mentions ?? m.mentions, isEdited: true }
+            : m
+        )
+      );
     };
     const onDeleted = (p: { messageId: string }) => {
       setMessages((prev) => prev.map((m) => (m._id === p.messageId ? { ...m, isDeleted: true, text: '' } : m)));
@@ -121,6 +137,64 @@ export default function GlobalChat() {
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages.length]);
+
+  // ---------- message search (debounced) ----------
+  useEffect(() => {
+    const q = searchQ.trim();
+    if (!q) {
+      setSearchResults([]);
+      return;
+    }
+    let cancelled = false;
+    const t = setTimeout(() => {
+      setSearchingMsgs(true);
+      api.get('/global/search', { params: { q } })
+        .then(({ data }) => {
+          if (!cancelled) setSearchResults((data as { messages: GMsg[] }).messages);
+        })
+        .catch(() => {
+          if (!cancelled) setSearchResults([]);
+        })
+        .finally(() => {
+          if (!cancelled) setSearchingMsgs(false);
+        });
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [searchQ]);
+
+  const scrollToMessage = (id: string) => {
+    window.setTimeout(() => {
+      const el = document.querySelector(`[data-mid="${id}"]`);
+      el?.scrollIntoView({ block: 'center' });
+      setHighlightId(id);
+      window.setTimeout(() => setHighlightId((h) => (h === id ? null : h)), 1800);
+    }, 120);
+  };
+
+  // Jump: scroll if already loaded, otherwise page through older history until found.
+  const jumpToMessage = async (target: GMsg) => {
+    if (messages.some((m) => m._id === target._id)) {
+      scrollToMessage(target._id);
+      return;
+    }
+    let cursor = nextBefore;
+    for (let i = 0; i < 15 && cursor; i++) {
+      const { data } = await api.get(`/global/messages?limit=100&before=${cursor}`);
+      const d = data as { messages: GMsg[]; nextBefore: string | null };
+      if (!d.messages.length) break;
+      setMessages((prev) => {
+        const seen = new Set(prev.map((p) => p._id));
+        return [...d.messages.filter((c) => !seen.has(c._id)), ...prev];
+      });
+      cursor = d.nextBefore;
+      setNextBefore(cursor);
+      if (d.messages.some((c) => c._id === target._id)) break;
+    }
+    scrollToMessage(target._id);
+  };
 
   const visible = useMemo(() => messages.filter((m) => !m.isDeleted), [messages]);
 
@@ -217,9 +291,72 @@ export default function GlobalChat() {
             <span className="hidden min-[420px]:inline">{meta?.onlineCount ?? '—'} online · </span>one chat for the whole world
           </p>
         </div>
+        <div className="ml-auto flex items-center gap-1 shrink-0">
+          <button
+            className={`p-2 rounded-full transition cursor-pointer ${
+              searchOpen ? 'bg-[var(--wa-active)] text-[var(--wa-text)]' : 'text-[var(--wa-text-2)] hover:bg-[var(--wa-hover)] hover:text-[var(--wa-text)]'
+            }`}
+            title="Search messages"
+            onClick={() => setSearchOpen((o) => !o)}
+          >
+            <Search size={17} />
+          </button>
+        </div>
       </header>
 
-
+      {/* message search */}
+      {searchOpen && (
+        <div className="shrink-0 border-b border-[var(--wa-border)] bg-[var(--wa-panel-2)] px-3 py-2 z-30">
+          <div className="flex items-center gap-2 bg-[var(--wa-search)] rounded-lg px-3 py-1.5 border border-white/5">
+            <Search size={14} className="text-[var(--wa-text-2)] shrink-0" />
+            <input
+              autoFocus
+              className="bg-transparent outline-none text-[13.5px] w-full placeholder:text-[var(--wa-text-2)]"
+              placeholder="Search messages…"
+              value={searchQ}
+              onChange={(e) => setSearchQ(e.target.value)}
+            />
+            {searchingMsgs && <Spinner size={12} />}
+            <button
+              className="text-[var(--wa-text-2)] hover:text-[var(--wa-text)] shrink-0"
+              title="Close search"
+              onClick={() => {
+                setSearchOpen(false);
+                setSearchQ('');
+              }}
+            >
+              <X size={14} />
+            </button>
+          </div>
+          {searchQ.trim() && (
+            <div className="mt-2 max-h-52 overflow-y-auto wa-scroll space-y-1">
+              {searchResults.length === 0 && !searchingMsgs && (
+                <p className="text-[13px] text-[var(--wa-text-2)] px-1 py-1">No messages found for "{searchQ}"</p>
+              )}
+              {searchResults.map((r) => (
+                <button
+                  key={r._id}
+                  onClick={() => jumpToMessage(r)}
+                  className="w-full text-left px-2 py-1.5 rounded-lg hover:bg-[var(--wa-active)] flex items-start gap-2 cursor-pointer"
+                >
+                  <Avatar
+                    src={!r.isAnonymous ? r.senderAvatar || undefined : undefined}
+                    name={r.isAnonymous ? '?' : r.senderDisplayName}
+                    size={24}
+                  />
+                  <span className="flex-1 min-w-0">
+                    <span className="flex justify-between gap-2 text-[11px] text-[var(--wa-text-2)]">
+                      <span className="truncate font-medium">{r.isAnonymous ? 'anonymous' : r.senderDisplayName}</span>
+                      <span className="shrink-0">{new Date(r.createdAt).toLocaleString()}</span>
+                    </span>
+                    <span className="block text-[13px] text-[var(--wa-text)] truncate">{r.text}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* messages */}
       <div className="flex-1 overflow-y-auto wa-scroll py-3">
@@ -240,6 +377,8 @@ export default function GlobalChat() {
                   key={m._id}
                   m={m}
                   mine={m.senderId === me?.id}
+                  flash={highlightId === m._id}
+                  onMention={(userId) => setProfileId(userId)}
                   onReply={() => {
                     setReplyTo(m);
                     inputRef.current?.focus();
@@ -370,14 +509,15 @@ export default function GlobalChat() {
 
 // ---------------- message row ----------------
 function GlobalMessageRow({
-  m, mine, onReply, onReact, onEdit, onDelete, onReport, onProfile,
+  m, mine, flash, onMention, onReply, onReact, onEdit, onDelete, onReport, onProfile,
 }: {
-  m: GMsg; mine: boolean;
+  m: GMsg; mine: boolean; flash?: boolean;
+  onMention: (userId: string) => void;
   onReply: () => void; onReact: (emoji: string) => void; onEdit: () => void;
   onDelete: () => void; onReport: () => void; onProfile: () => void;
 }) {
   return (
-    <div className={`wa-row ${mine ? 'out' : 'in'} group`}>
+    <div data-mid={m._id} className={`wa-row ${mine ? 'out' : 'in'} group ${flash ? 'msg-flash' : ''}`}>
       {!mine && (
         <button onClick={onProfile} className="self-end mr-2 mb-1 shrink-0" title="View profile">
           <Avatar
@@ -404,7 +544,7 @@ function GlobalMessageRow({
           <span className="inline-block text-[10px] bg-violet-500/20 text-violet-300 px-1.5 py-0.5 rounded-full font-semibold mb-0.5">Question</span>
         )}
         <span className="text-[14.2px]">
-          {m.isDeleted ? <i className="opacity-60">🚫 This message was deleted</i> : m.text}
+          {m.isDeleted ? <i className="opacity-60">🚫 This message was deleted</i> : renderMentions(m.text, m.mentions, onMention)}
           {m.isEdited && !m.isDeleted && <span className="text-[11px] opacity-50 ml-1">edited</span>}
         </span>
         <span className="wa-meta">
@@ -449,6 +589,30 @@ function GlobalMessageRow({
       )}
     </div>
   );
+}
+
+/** Highlight @handles that resolve to real users; click opens their profile. */
+function renderMentions(
+  text: string,
+  mentions: GMsg['mentions'],
+  onMention: (userId: string) => void
+) {
+  const byHandle = new Map((mentions ?? []).map((x) => [x.username.toLowerCase(), x.userId]));
+  return text.split(/(@[A-Za-z0-9_.]{2,30})/g).map((part, i) => {
+    const handle = part.startsWith('@') ? part.slice(1).toLowerCase() : '';
+    const uid = handle ? byHandle.get(handle) : undefined;
+    if (!uid) return <span key={i}>{part}</span>;
+    return (
+      <button
+        key={i}
+        className="mention cursor-pointer"
+        title={`View @${handle}`}
+        onClick={() => onMention(uid)}
+      >
+        {part}
+      </button>
+    );
+  });
 }
 
 
