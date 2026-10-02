@@ -247,9 +247,67 @@ async function main() {
     'deleted voice note clears its attachment'
   );
 
+  // --- register a third user for mention tests ---
+  const c = cookieJar();
+  await c.call('POST', '/auth/register', { username: 'sockc', displayName: 'Sock C', email: 'c@sock.test', password: 'password123' });
+  const gc = await connect(`${BASE}/global`, c.cookie);
+  assert(gc.connected, 'third socket connects');
+
+  // --- @mentions: resolved on send, self excluded, targeted ping delivered ---
+  const mentionPromise = waitEvent<any>(gb, 'global:mention');
+  const mrest = await a.call('POST', '/global/messages', { text: 'hey @sockb and @socka heads up' });
+  assert(mrest.status === 201, 'REST global message with mention created');
+  const mdoc = mrest.json.message;
+  const mentioned = (mdoc.mentions ?? []).map((m: any) => m.username);
+  assert(mentioned.includes('sockb') && !mentioned.includes('socka'), 'mentions resolve the target but never the sender');
+  const mEvt = await mentionPromise;
+  assert(mEvt.messageId === String(mdoc._id), 'mentioned user receives global:mention ping');
+  assert(mEvt.from?.username === 'socka', 'mention ping carries the sender');
+  assert(typeof mEvt.text === 'string' && mEvt.text.includes('heads up'), 'mention ping carries message text');
+
+  // --- global search finds it; unknown terms find nothing ---
+  const gsearch = await a.call('GET', '/global/search?q=' + encodeURIComponent('heads up'));
+  assert(
+    (gsearch.json.messages ?? []).some((m: any) => String(m._id) === String(mdoc._id)),
+    'global message search finds the message'
+  );
+  const gsearchMiss = await a.call('GET', '/global/search?q=' + encodeURIComponent('zzz-no-such-term-zzz'));
+  assert((gsearchMiss.json.messages ?? []).length === 0, 'global search misses unknown terms');
+
+  // --- editing to ADD a new mention pings only the newly mentioned user ---
+  let bPingCount = 0;
+  const countPing = () => { bPingCount += 1; };
+  gb.on('global:mention', countPing);
+  const cPingPromise = waitEvent<any>(gc, 'global:mention');
+  await new Promise<void>((resolve) => {
+    ga.emit('global:edit', { messageId: mdoc._id, text: 'updated: @sockb @sockc look at this' }, (res: any) => {
+      if (res?.error) throw new Error('global:edit error: ' + res.error);
+      resolve();
+    });
+  });
+  const cPing = await cPingPromise;
+  assert(cPing.messageId === String(mdoc._id), 'editing to add a mention pings the new mention');
+  await new Promise((r) => setTimeout(r, 300));
+  assert(bPingCount === 0, 'already-mentioned user is NOT re-pinged on edit');
+  gb.off('global:mention', countPing);
+
+  // --- conversation search: finds hits, misses non-matches ---
+  const dsearch = await a.call('GET', `/messages/search?conversationId=${convId}&q=` + encodeURIComponent('SECRET-DM'));
+  assert(
+    (dsearch.json.messages ?? []).some((m: any) => m.text === 'SECRET-DM-PING'),
+    'conversation search finds a DM'
+  );
+  const dsearchMiss = await a.call(
+    'GET',
+    `/messages/search?conversationId=${convId}&q=` + encodeURIComponent('zzz-no-such-term-zzz')
+  );
+  assert((dsearchMiss.json.messages ?? []).length === 0, 'conversation search misses unknown terms');
+  const dsearchBad = await b.call('GET', `/messages/search?conversationId=${'f'.repeat(24)}&q=hello`);
+  assert(dsearchBad.status === 404, 'conversation search rejects unknown conversations');
+
   console.log(results.join('\n'));
   console.log('\n✅ LIVE SOCKET TESTS PASSED');
-  [ga, gb, da, db_].forEach((s) => s.disconnect());
+  [ga, gb, gc, da, db_].forEach((s) => s.disconnect());
   process.exit(0);
 }
 

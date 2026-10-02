@@ -133,6 +133,11 @@ export default function Chats() {
   const [recordMs, setRecordMs] = useState(0);
   const [sendingMedia, setSendingMedia] = useState(false);
   const [blockedState, setBlockedState] = useState<{ blockedMe: boolean; iBlocked: boolean }>({ blockedMe: false, iBlocked: false });
+  const [msgSearchOpen, setMsgSearchOpen] = useState(false);
+  const [msgQ, setMsgQ] = useState('');
+  const [msgResults, setMsgResults] = useState<ChatMessage[]>([]);
+  const [msgSearching, setMsgSearching] = useState(false);
+  const [highlightId, setHighlightId] = useState<string | null>(null);
 
   const endRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -179,11 +184,43 @@ export default function Chats() {
     refetchInterval: 30_000,
   });
 
+  // ---------- search inside the active conversation (debounced) ----------
+  useEffect(() => {
+    const q = msgQ.trim();
+    if (!q) {
+      setMsgResults([]);
+      return;
+    }
+    let cancelled = false;
+    const t = setTimeout(() => {
+      setMsgSearching(true);
+      api
+        .get('/messages/search', { params: { conversationId: activeConv?.id, q } })
+        .then(({ data }) => {
+          if (!cancelled) setMsgResults((data as { messages: ChatMessage[] }).messages);
+        })
+        .catch(() => {
+          if (!cancelled) setMsgResults([]);
+        })
+        .finally(() => {
+          if (!cancelled) setMsgSearching(false);
+        });
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [msgQ, activeConv?.id]);
+
   const openConversation = useCallback(
-    async (conv: { id: string; other?: ConversationSummary['other'] } | null) => {
+    async    (conv: { id: string; other?: ConversationSummary['other'] } | null) => {
       setError('');
       setReplyTo(null);
       setEditing(null);
+      setMsgSearchOpen(false);
+      setMsgQ('');
+      setMsgResults([]);
+      setHighlightId(null);
       if (!conv) {
         setActiveConv(null);
         return;
@@ -528,6 +565,38 @@ export default function Chats() {
     }
   };
 
+  const scrollToMessage = (id: string) => {
+    window.setTimeout(() => {
+      const el = document.querySelector(`[data-mid="${id}"]`);
+      el?.scrollIntoView({ block: 'center' });
+      setHighlightId(id);
+      window.setTimeout(() => setHighlightId((h) => (h === id ? null : h)), 1800);
+    }, 120);
+  };
+
+  // Jump to a search hit: scroll if loaded, otherwise page back through history.
+  const jumpToMessage = async (target: ChatMessage) => {
+    if (!activeConv) return;
+    if (messages.some((m) => m._id === target._id)) {
+      scrollToMessage(target._id);
+      return;
+    }
+    let cursor = nextBefore;
+    for (let i = 0; i < 15 && cursor; i++) {
+      const { data } = await api.get(`/chats/${activeConv.id}/messages?limit=100&before=${cursor}`);
+      const d = data as { messages: ChatMessage[]; nextBefore: string | null };
+      if (!d.messages.length) break;
+      setMessages((prev) => {
+        const seen = new Set(prev.map((p) => p._id));
+        return [...d.messages.filter((c) => !seen.has(c._id)), ...prev];
+      });
+      cursor = d.nextBefore;
+      setNextBefore(cursor);
+      if (d.messages.some((c) => c._id === target._id)) break;
+    }
+    scrollToMessage(target._id);
+  };
+
   const convItems = chatsQuery.data?.items ?? [];
 
   // group messages by day for date chips
@@ -734,6 +803,15 @@ export default function Chats() {
           </div>
         </button>
         <div className="ml-auto flex items-center gap-1 text-[var(--wa-text-2)]">
+          <button
+            className={`p-2 rounded-full transition cursor-pointer ${
+              msgSearchOpen ? 'bg-[var(--wa-active)] text-[var(--wa-text)]' : 'hover:bg-[var(--wa-active)] hover:text-[var(--wa-text)]'
+            }`}
+            title="Search this chat"
+            onClick={() => setMsgSearchOpen((o) => !o)}
+          >
+            <Search size={17} />
+          </button>
           <span title="Private area: only you two" className="mr-1 inline-flex"><Lock size={15} /></span>
           <button
             className="p-2 rounded-full hover:bg-[var(--wa-active)] hover:text-rose-300"
@@ -761,6 +839,59 @@ export default function Chats() {
           </button>
         </div>
       </header>
+
+      {/* search inside this conversation */}
+      {msgSearchOpen && (
+        <div className="shrink-0 border-b border-[var(--wa-border)] bg-[var(--wa-panel-2)] px-3 py-2 z-30">
+          <div className="flex items-center gap-2 wa-glass-input rounded-lg px-3 py-1.5">
+            <Search size={14} className="text-[var(--wa-text-2)] shrink-0" />
+            <input
+              autoFocus
+              className="bg-transparent outline-none text-[13.5px] w-full placeholder:text-[var(--wa-text-2)]"
+              placeholder="Search in this conversation…"
+              value={msgQ}
+              onChange={(e) => setMsgQ(e.target.value)}
+            />
+            {msgSearching && <Spinner size={12} />}
+            <button
+              className="text-[var(--wa-text-2)] hover:text-[var(--wa-text)] shrink-0"
+              title="Close search"
+              onClick={() => {
+                setMsgSearchOpen(false);
+                setMsgQ('');
+              }}
+            >
+              <X size={14} />
+            </button>
+          </div>
+          {msgQ.trim() && (
+            <div className="mt-2 max-h-52 overflow-y-auto wa-scroll space-y-1">
+              {msgResults.length === 0 && !msgSearching && (
+                <p className="text-[13px] text-[var(--wa-text-2)] px-1 py-1">No messages found for "{msgQ}"</p>
+              )}
+              {msgResults.map((r) => (
+                <button
+                  key={r._id}
+                  onClick={() => jumpToMessage(r)}
+                  className="w-full text-left px-2 py-1.5 rounded-lg hover:bg-[var(--wa-active)] flex items-start gap-2 cursor-pointer"
+                >
+                  <span className="flex-1 min-w-0">
+                    <span className="flex justify-between gap-2 text-[11px] text-[var(--wa-text-2)]">
+                      <span className="truncate font-medium">
+                        {r.senderId === me?.id ? 'You' : activeConv.other?.displayName ?? 'Them'}
+                      </span>
+                      <span className="shrink-0">{new Date(r.createdAt).toLocaleString()}</span>
+                    </span>
+                    <span className="block text-[13px] text-[var(--wa-text)] truncate">
+                      {messagePreview(r) || '—'}
+                    </span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* messages */}
       <div className="flex-1 overflow-y-auto wa-scroll py-3">
@@ -822,7 +953,7 @@ export default function Chats() {
                 }, {})
               );
               return (
-                <div key={m._id} className={`wa-row ${mine ? 'out' : 'in'} group`}>
+                <div key={m._id} data-mid={m._id} className={`wa-row ${mine ? 'out' : 'in'} group ${highlightId === m._id ? 'msg-flash' : ''}`}>
                   <div className={`wa-bubble ${mine ? 'out' : 'in'} msg-in`}>
                     {parent && (
                       <div className="text-[12.5px] rounded-md px-2 py-1 mb-1 border-l-[3px] border-[var(--wa-green)] bg-black/20">

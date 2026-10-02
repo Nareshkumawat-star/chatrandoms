@@ -360,6 +360,17 @@ body {
 }
 .msg-in { animation: msg-in 0.18s ease-out; }
 
+/* ---------- @mention highlight ---------- */
+.mention { color: #38bdf8; font-weight: 600; }
+.mention:hover { text-decoration: underline; }
+
+/* ---------- search: flash the message we jumped to ---------- */
+@keyframes msg-flash {
+  0%, 40% { background: rgba(56, 189, 248, 0.16); box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.4); border-radius: 12px; }
+  100% { background: transparent; box-shadow: none; }
+}
+.msg-flash { animation: msg-flash 1.8s ease-out; border-radius: 12px; }
+
 /* ---------- skeleton shimmer ---------- */
 @keyframes shimmer {
   0% { background-position: -400px 0; }
