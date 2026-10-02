@@ -9,14 +9,14 @@ import { useAuth } from '../store/auth';
 import { useUi } from '../store/ui';
 import { getGlobalSocket, getDmSocket } from '../lib/socket';
 import { initSoundUnlock, playMessageSound, playGlobalPing, isSoundMuted, setSoundMuted } from '../lib/sound';
-import { setDmUnread, setGlobalActivity, resetTitle } from '../lib/tabTitle';
+import { setDmUnread, setGlobalActivity, setGlobalMentions, resetTitle } from '../lib/tabTitle';
 import {
   notificationsSupported, getNotificationPermission, requestNotificationPermission, showMessageNotification,
 } from '../lib/notifications';
 import Avatar from '../components/common/Avatar';
 import AppSidebar from '../components/common/AppSidebar';
 import { SkeletonRow } from '../components/uiverse/Spinner';
-import type { ConversationSummary, Me } from '../types';
+import type { ConversationSummary, Me, PublicUser } from '../types';
 
 export default function AppLayout() {
   const navigate = useNavigate();
@@ -31,6 +31,7 @@ export default function AppLayout() {
   const [soundOff, setSoundOff] = useState(isSoundMuted());
   const [notifyState, setNotifyState] = useState(getNotificationPermission());
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [mentionCount, setMentionCount] = useState(0);
 
   useEffect(() => {
     const on = () => setOnline(true);
@@ -98,11 +99,32 @@ export default function AppLayout() {
         setGlobalActivity(true);
       }
     };
+    // Someone typed @you in Global Chat → stronger chime + desktop notification + badge.
+    const onMention = (p: {
+      messageId: string;
+      text: string;
+      from: { id: string; displayName: string; avatar?: string } | null;
+    }) => {
+      setMentionCount((c) => c + 1);
+      playMessageSound();
+      showMessageNotification({
+        title: p.from ? `${p.from.displayName} mentioned you` : 'You were mentioned in Global Chat',
+        body: p.text.slice(0, 120),
+        icon: p.from?.avatar,
+        tag: 'global-mention',
+        onClick: () => {
+          setSection('global');
+          navigate('/app/global');
+        },
+      });
+    };
     gs.on('global:message', onMsg);
+    gs.on('global:mention', onMention);
     return () => {
       gs.off('global:message', onMsg);
+      gs.off('global:mention', onMention);
     };
-  }, [me?.id]);
+  }, [me?.id, navigate, setSection]);
 
   const chatsQuery = useQuery({
     queryKey: ['chats'],
@@ -121,8 +143,16 @@ export default function AppLayout() {
 
   // Clear global-activity dot when viewing Global Chat
   useEffect(() => {
-    if (section === 'global') setGlobalActivity(false);
+    if (section === 'global') {
+      setGlobalActivity(false);
+      setMentionCount(0);
+    }
   }, [section]);
+
+  // Mention badge → browser tab title
+  useEffect(() => {
+    setGlobalMentions(mentionCount);
+  }, [mentionCount]);
 
   const filteredItems = useMemo(() => {
     const q = listSearch.trim().toLowerCase();
@@ -133,6 +163,39 @@ export default function AppLayout() {
         c.other?.username?.toLowerCase().includes(q)
     );
   }, [items, listSearch]);
+
+  const [userResults, setUserResults] = useState<PublicUser[]>([]);
+  const [searchingUsers, setSearchingUsers] = useState(false);
+
+  useEffect(() => {
+    const q = listSearch.trim();
+    if (!q) {
+      setUserResults([]);
+      setSearchingUsers(false);
+      return;
+    }
+    const timer = setTimeout(() => {
+      setSearchingUsers(true);
+      api.get('/users/search', { params: { q } })
+        .then(({ data }) => setUserResults((data as { results: PublicUser[] }).results))
+        .catch(() => setUserResults([]))
+        .finally(() => setSearchingUsers(false));
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [listSearch]);
+
+  const startDirectChat = async (username: string) => {
+    try {
+      const { data } = await api.post('/chats/direct', { username });
+      qc.invalidateQueries({ queryKey: ['chats'] });
+      setListSearch('');
+      setSection('chats');
+      navigate('/app/chats');
+      useUi.getState().requestOpenConversation(data.conversation.id);
+    } catch {
+      // ignore
+    }
+  };
 
   const logout = async () => {
     try {
@@ -156,187 +219,204 @@ export default function AppLayout() {
 
   return (
     <div className="h-screen w-screen flex bg-[var(--wa-bg)] text-[var(--wa-text)] overflow-hidden app-shell-bg">
-      {/* ============ LEFT SIDEBAR — always visible, compact below md ============ */}
-      <AppSidebar onLogout={logout} totalUnread={totalUnread} />
+      {/* ============ LEFT SIDEBAR — desktop/tablet rail ============ */}
+      <div className="hidden md:flex shrink-0">
+        <AppSidebar onLogout={logout} totalUnread={totalUnread} globalMentions={mentionCount} />
+      </div>
 
       <div className="flex-1 min-w-0 flex flex-col">
-      {/* ============ TOP NAVBAR — always visible ============ */}
-      <header className="h-[60px] shrink-0 bg-[var(--wa-panel-2)] border-b border-[var(--wa-border)] px-2 sm:px-3 md:px-4 flex items-center gap-1.5 sm:gap-2 md:gap-4 z-40">
-        {/* hamburger (mobile) — opens chat-list drawer */}
-        <button
-          className="lg:hidden p-2 rounded-full text-[var(--wa-text-2)] hover:bg-[var(--wa-hover)] hover:text-[var(--wa-text)]"
-          title="Menu"
-          onClick={() => setDrawerOpen(true)}
-        >
-          <Menu size={21} />
-        </button>
-
-        {/* logo */}
-        <button className="flex items-center gap-2 shrink-0" onClick={goGlobal} title="PulseChat">
-          <span className="text-2xl leading-none">🌍</span>
-          <span className="hidden sm:inline font-semibold text-[16px] tracking-tight">Pulse<span className="text-[var(--wa-green-hover)]">Chat</span></span>
-        </button>
-
-        {/* right controls */}
-        <div className="ml-auto flex items-center gap-1 md:gap-2 shrink-0">
-          {!online && <span title="Offline" className="inline-flex text-amber-400"><WifiOff size={16} /></span>}
+        {/* ============ TOP NAVBAR ============ */}
+        <header className="h-[60px] shrink-0 bg-[var(--wa-panel-2)] border-b border-[var(--wa-border)] px-2 sm:px-3 md:px-4 flex items-center gap-1.5 sm:gap-2 md:gap-4 z-40">
+          {/* hamburger (mobile) — opens navigation sidebar drawer */}
           <button
-            className="p-2 rounded-full text-[var(--wa-text-2)] hover:bg-[var(--wa-hover)] hover:text-[var(--wa-text)] transition"
-            title={soundOff ? 'Unmute notification sounds' : 'Mute notification sounds'}
-            onClick={() => {
-              setSoundMuted(!isSoundMuted());
-              setSoundOff(isSoundMuted());
-            }}
+            className="md:hidden p-2 rounded-full text-[var(--wa-text-2)] hover:bg-[var(--wa-hover)] hover:text-[var(--wa-text)] cursor-pointer"
+            title="Menu"
+            onClick={() => setDrawerOpen(true)}
           >
-            {soundOff ? <VolumeX size={19} /> : <Volume2 size={19} />}
+            <Menu size={21} />
           </button>
-          {notificationsSupported() && (
+
+          {/* logo */}
+          <button className="flex items-center gap-2 shrink-0 cursor-pointer" onClick={goGlobal} title="PulseChat">
+            <span className="text-2xl leading-none">🌍</span>
+            <span className="hidden sm:inline font-semibold text-[16px] tracking-tight">Pulse<span className="text-[var(--wa-green-hover)]">Chat</span></span>
+          </button>
+
+          {/* right controls */}
+          <div className="ml-auto flex items-center gap-1 md:gap-2 shrink-0">
+            {!online && <span title="Offline" className="inline-flex text-amber-400"><WifiOff size={16} /></span>}
             <button
-              className={`p-2 rounded-full transition ${
-                notifyState === 'granted'
-                  ? 'text-[var(--wa-green-hover)]'
-                  : 'text-[var(--wa-text-2)] hover:bg-[var(--wa-hover)] hover:text-[var(--wa-text)]'
-              }`}
-              title={
-                notifyState === 'granted'
-                  ? 'Desktop notifications enabled (fire when tab is hidden)'
-                  : notifyState === 'denied'
-                    ? 'Notifications blocked — enable in browser site settings'
-                    : 'Enable desktop notifications'
-              }
-              onClick={async () => {
-                if (notifyState !== 'default') return;
-                setNotifyState(await requestNotificationPermission());
+              className="p-2 rounded-full text-[var(--wa-text-2)] hover:bg-[var(--wa-hover)] hover:text-[var(--wa-text)] transition cursor-pointer"
+              title={soundOff ? 'Unmute notification sounds' : 'Mute notification sounds'}
+              onClick={() => {
+                setSoundMuted(!isSoundMuted());
+                setSoundOff(isSoundMuted());
               }}
             >
-              {notifyState === 'granted' ? <Bell size={19} /> : <BellOff size={19} />}
+              {soundOff ? <VolumeX size={19} /> : <Volume2 size={19} />}
             </button>
-          )}
-          <button
-            className="p-2 rounded-full text-[var(--wa-text-2)] hover:bg-[var(--wa-hover)] hover:text-[var(--wa-text)] transition"
-            title="Profile / Settings"
-            onClick={() => {
-              setSection('settings');
-              navigate('/app/settings');
-            }}
-          >
-            <SettingsIcon size={19} />
-          </button>
-          <button onClick={() => navigate('/app/settings')} title="Your profile" className="ml-0.5">
-            <Avatar src={me?.avatar || undefined} name={me?.displayName ?? '?'} size={34} />
-          </button>
-        </div>
-      </header>
-
-      {/* ============ DRAWER (chat list) — the rail is always visible, so this
-           drawer only needs to carry the conversation list below lg ============ */}
-      {drawerOpen && (
-        <div className="fixed inset-0 z-50 lg:hidden">
-          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setDrawerOpen(false)} />
-          <div className="absolute left-0 top-0 bottom-0 w-[88%] max-w-[360px] wa-glass-panel border-r border-[var(--wa-border)] flex flex-col shadow-2xl">
-            <div className="h-[59px] shrink-0 px-4 flex items-center justify-between wa-glass-header">
-              <h2 className="font-semibold text-[16px]">Chats</h2>
+            {notificationsSupported() && (
               <button
-                className="p-2 rounded-full text-[var(--wa-text-2)] hover:bg-[var(--wa-hover)]"
-                onClick={() => setDrawerOpen(false)}
-                aria-label="Close"
+                className={`p-2 rounded-full transition cursor-pointer ${
+                  notifyState === 'granted'
+                    ? 'text-[var(--wa-green-hover)]'
+                    : 'text-[var(--wa-text-2)] hover:bg-[var(--wa-hover)] hover:text-[var(--wa-text)]'
+                }`}
+                title={
+                  notifyState === 'granted'
+                    ? 'Desktop notifications enabled'
+                    : notifyState === 'denied'
+                      ? 'Notifications blocked'
+                      : 'Enable desktop notifications'
+                }
+                onClick={async () => {
+                  if (notifyState !== 'default') return;
+                  setNotifyState(await requestNotificationPermission());
+                }}
               >
-                <X size={19} />
+                {notifyState === 'granted' ? <Bell size={19} /> : <BellOff size={19} />}
               </button>
-            </div>
-            <DrawerList
-              filteredItems={filteredItems}
-              loading={chatsQuery.isLoading}
-              section={section}
-              onNavigate={() => setDrawerOpen(false)}
-              goGlobal={goGlobal}
-              onlineCountInline={<OnlineCountInline />}
-              listSearch={listSearch}
-              setListSearch={setListSearch}
-            />
+            )}
+            <button
+              className="p-2 rounded-full text-[var(--wa-text-2)] hover:bg-[var(--wa-hover)] hover:text-[var(--wa-text)] transition cursor-pointer"
+              title="Profile / Settings"
+              onClick={() => {
+                setSection('settings');
+                navigate('/app/settings');
+              }}
+            >
+              <SettingsIcon size={19} />
+            </button>
+            <button onClick={() => navigate('/app/settings')} title="Your profile" className="ml-0.5 cursor-pointer">
+              <Avatar src={me?.avatar || undefined} name={me?.displayName ?? '?'} size={34} />
+            </button>
           </div>
-        </div>
-      )}
+        </header>
+
+        {/* ============ DRAWER (mobile sidebar) ============ */}
+        {drawerOpen && (
+          <div className="fixed inset-0 z-50 md:hidden">
+            <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setDrawerOpen(false)} />
+            <div className="absolute left-0 top-0 bottom-0 w-[260px] max-w-[85vw] flex flex-col shadow-2xl z-10">
+              <AppSidebar onLogout={logout} totalUnread={totalUnread} globalMentions={mentionCount} onNavigate={() => setDrawerOpen(false)} />
+            </div>
+          </div>
+        )}
 
       {/* ============ BODY: chat list + main ============ */}
       <div className="flex-1 min-h-0 flex">
-        {/* chat list panel — desktop/tablet only (mobile uses the drawer) */}
-        <aside className="hidden lg:flex w-[400px] shrink-0 wa-glass-panel border-r border-[var(--wa-border)] flex-col max-lg:w-[340px]">
-          {/* search */}
-          <div className="px-3 py-2 border-b border-[var(--wa-border)]">
-            <div className="flex items-center gap-2 bg-[var(--wa-search)] rounded-lg px-3 py-1.5">
-              <Search size={15} className="text-[var(--wa-text-2)] shrink-0" />
-              <input
-                className="bg-transparent outline-none text-[14px] w-full placeholder:text-[var(--wa-text-2)]"
-                placeholder="Search or start a new chat"
-                value={listSearch}
-                onChange={(e) => setListSearch(e.target.value)}
-              />
+        {/* chat list panel — desktop/tablet only (hidden when in Settings) */}
+        {section !== 'settings' && (
+          <aside className="hidden lg:flex w-[340px] xl:w-[400px] shrink-0 wa-glass-panel border-r border-[var(--wa-border)] flex-col">
+            {/* ===== SECTION 1: GLOBAL ===== */}
+            <div className="px-4 pt-3 pb-1 flex items-center justify-between">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-sky-400/90 flex items-center gap-1.5">
+                <Globe size={11} /> Global
+              </span>
+              <span className="text-[10px] text-[var(--wa-text-2)]">everyone · public</span>
             </div>
-          </div>
-
-          {/* ===== SECTION 1: GLOBAL ===== */}
-          <div className="px-4 pt-3 pb-1 flex items-center justify-between">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-sky-400/90 flex items-center gap-1.5">
-              <Globe size={11} /> Global
-            </span>
-            <span className="text-[10px] text-[var(--wa-text-2)]">everyone · public</span>
-          </div>
-          <div className="px-2">
-            <div
-              className={`wa-row-item rounded-lg ${section === 'global' ? 'active' : ''} cursor-pointer`}
-              onClick={goGlobal}
-            >
-              <div className="flex items-center gap-3 px-3 py-2.5">
-                <div className="w-[49px] h-[49px] rounded-full bg-gradient-to-br from-sky-400 to-sky-700 flex items-center justify-center text-2xl shrink-0">🌍</div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex justify-between items-baseline gap-2">
-                    <span className="font-medium text-[15px]">Global Chat</span>
-                    <OnlineCountInline />
+            <div className="px-2">
+              <div
+                className={`wa-row-item rounded-lg ${section === 'global' ? 'active' : ''} cursor-pointer`}
+                onClick={goGlobal}
+              >
+                <div className="flex items-center gap-3 px-3 py-2.5">
+                  <div className="w-[49px] h-[49px] rounded-full bg-gradient-to-br from-sky-400 to-sky-700 flex items-center justify-center text-2xl shrink-0">🌍</div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex justify-between items-baseline gap-2">
+                      <span className="font-medium text-[15px]">Global Chat</span>
+                      <span className="flex items-center gap-1.5 shrink-0">
+                        {mentionCount > 0 && (
+                          <span className="text-[10px] font-bold bg-amber-400/20 text-amber-300 rounded-full px-1.5 py-px">
+                            @{mentionCount}
+                          </span>
+                        )}
+                        <OnlineCountInline />
+                      </span>
+                    </div>
+                    <div className="text-[13px] text-[var(--wa-text-2)] truncate">One chat · the whole world · live</div>
                   </div>
-                  <div className="text-[13px] text-[var(--wa-text-2)] truncate">One chat · the whole world · live</div>
                 </div>
               </div>
             </div>
-          </div>
 
-          <div className="mx-3 my-2 h-px bg-[var(--wa-border)]" />
+            <div className="mx-3 my-2 h-px bg-[var(--wa-border)]" />
 
-          {/* ===== SECTION 2: ONE-TO-ONE ===== */}
-          <div className="px-4 pb-1 flex items-center justify-between">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-400/90 flex items-center gap-1.5">
-              <MessageCircle size={11} /> One-to-One
-            </span>
-            <button
-              className="text-[11px] font-semibold text-[var(--wa-green-hover)] hover:text-[var(--wa-text)] flex items-center gap-1"
-              onClick={goChats}
-            >
-              + New Chat
-            </button>
-          </div>
-          <div className="flex-1 overflow-y-auto wa-scroll px-2 pb-3">
-            {chatsQuery.isLoading ? (
-              <div className="px-2 pt-2"><SkeletonRow /><SkeletonRow /><SkeletonRow /></div>
-            ) : filteredItems.length === 0 ? (
-              <div className="text-center text-[13px] text-[var(--wa-text-2)] px-8 py-10 leading-relaxed">
-                <Users size={26} className="mx-auto mb-3 opacity-40" />
-                No private chats yet.<br />
-                Tap <span className="text-[var(--wa-green-hover)]">+ New Chat</span> → search a username (e.g. <span className="text-[var(--wa-text)]">@nareshk</span>).
-              </div>
-            ) : (
-              filteredItems.map((c) => <ChatListItem key={c.id} conv={c} />)
-            )}
-          </div>
-
-          {/* profile footer */}
-          <div className="h-[55px] shrink-0 border-t border-[var(--wa-border)] bg-[var(--wa-panel-2)] px-4 flex items-center gap-3">
-            <Avatar src={me?.avatar || undefined} name={me?.displayName ?? '?'} size={38} />
-            <div className="flex-1 min-w-0">
-              <div className="text-[14px] font-medium truncate">{me?.displayName}</div>
-              <div className="text-[12px] text-[var(--wa-text-2)] truncate">{me?.isGuest ? 'Guest — limited mode' : `@${me?.username}`}</div>
+            {/* ===== SECTION 2: ONE-TO-ONE ===== */}
+            <div className="px-4 pb-1 flex items-center justify-between">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-400/90 flex items-center gap-1.5">
+                <MessageCircle size={11} /> One-to-One
+              </span>
+              <button
+                className="text-[11px] font-semibold text-[var(--wa-green-hover)] hover:text-[var(--wa-text)] flex items-center gap-1 cursor-pointer"
+                onClick={goChats}
+              >
+                + New Chat
+              </button>
             </div>
-          </div>
-        </aside>
+
+            {/* search (inside One-to-One section) */}
+            <div className="px-3 py-1.5">
+              <div className="flex items-center gap-2 bg-[var(--wa-search)] rounded-lg px-3 py-1.5 border border-white/5">
+                <Search size={15} className="text-[var(--wa-text-2)] shrink-0" />
+                <input
+                  className="bg-transparent outline-none text-[13.5px] w-full placeholder:text-[var(--wa-text-2)]"
+                  placeholder="Search username… e.g. @nareshk"
+                  value={listSearch}
+                  onChange={(e) => setListSearch(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto wa-scroll px-2 pb-3">
+              {chatsQuery.isLoading ? (
+                <div className="px-2 pt-2"><SkeletonRow /><SkeletonRow /><SkeletonRow /></div>
+              ) : listSearch.trim() ? (
+                <div>
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--wa-text-2)] px-2 py-1.5 flex items-center gap-1.5">
+                    <Users size={11} /> Search Results
+                  </div>
+                  {searchingUsers ? (
+                    <div className="px-2 pt-2"><SkeletonRow /></div>
+                  ) : userResults.length === 0 && filteredItems.length === 0 ? (
+                    <div className="text-center text-[13px] text-[var(--wa-text-2)] px-4 py-8">
+                      No users or chats found for "{listSearch}"
+                    </div>
+                  ) : (
+                    <>
+                      {filteredItems.map((c) => <ChatListItem key={c.id} conv={c} />)}
+                      {userResults.map((u) => (
+                        <div
+                          key={u.id}
+                          className="wa-row-item rounded-lg cursor-pointer"
+                          onClick={() => startDirectChat(u.username)}
+                        >
+                          <div className="flex items-center gap-3 px-3 py-2.5">
+                            <Avatar src={u.avatar || undefined} name={u.displayName} size={42} online={u.online} />
+                            <div className="flex-1 min-w-0">
+                              <div className="text-[14.5px] font-medium truncate">{u.displayName}</div>
+                              <div className="text-[12.5px] text-[var(--wa-text-2)] truncate">@{u.username}</div>
+                            </div>
+                            <button className="px-3 py-1 rounded-full bg-[var(--wa-green)] text-[#0b141a] text-[12px] font-semibold hover:bg-[var(--wa-green-hover)] transition cursor-pointer">
+                              Chat
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
+              ) : filteredItems.length === 0 ? (
+                <div className="text-center text-[13px] text-[var(--wa-text-2)] px-8 py-10 leading-relaxed">
+                  <Users size={26} className="mx-auto mb-3 opacity-40" />
+                  No private chats yet.<br />
+                  Search a username above (e.g. <span className="text-[var(--wa-text)]">@nareshk</span>).
+                </div>
+              ) : (
+                filteredItems.map((c) => <ChatListItem key={c.id} conv={c} />)
+              )}
+            </div>
+          </aside>
+        )}
 
         {/* main content */}
         <main className="flex-1 min-w-0 flex flex-col relative">
@@ -366,17 +446,6 @@ function DrawerList({ filteredItems, loading, section, onNavigate, goGlobal, onl
   const navigate = useNavigate();
   return (
     <>
-      <div className="px-3 py-2 border-b border-[var(--wa-border)]">
-        <div className="flex items-center gap-2 bg-[var(--wa-search)] rounded-lg px-3 py-1.5">
-          <Search size={15} className="text-[var(--wa-text-2)] shrink-0" />
-          <input
-            className="bg-transparent outline-none text-[14px] w-full placeholder:text-[var(--wa-text-2)]"
-            placeholder="Search or start a new chat"
-            value={listSearch}
-            onChange={(e) => setListSearch(e.target.value)}
-          />
-        </div>
-      </div>
       <div className="px-4 pt-3 pb-1">
         <span className="text-[11px] font-bold uppercase tracking-wider text-sky-400/90">🌐 Global</span>
       </div>
@@ -401,6 +470,17 @@ function DrawerList({ filteredItems, loading, section, onNavigate, goGlobal, onl
         >
           + New Chat
         </button>
+      </div>
+      <div className="px-3 py-1.5">
+        <div className="flex items-center gap-2 bg-[var(--wa-search)] rounded-lg px-3 py-1.5 border border-white/5">
+          <Search size={15} className="text-[var(--wa-text-2)] shrink-0" />
+          <input
+            className="bg-transparent outline-none text-[13.5px] w-full placeholder:text-[var(--wa-text-2)]"
+            placeholder="Search username… e.g. @nareshk"
+            value={listSearch}
+            onChange={(e) => setListSearch(e.target.value)}
+          />
+        </div>
       </div>
       <div className="flex-1 overflow-y-auto wa-scroll px-2 pb-3">
         {loading ? (

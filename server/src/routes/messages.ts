@@ -6,9 +6,14 @@ import { requireAuth } from '../middleware/auth.js';
 import { validate, asyncHandler } from '../middleware/validate.js';
 import { ApiError } from '../middleware/errors.js';
 import { sanitizeText } from '../utils/text.js';
+import { deleteAsset } from '../lib/cloudinary.js';
 import type { Request, Response } from 'express';
 
 const router = Router();
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 async function loadParticipantMessage(userId: string, messageId: string) {
   if (!/^[a-f\d]{24}$/i.test(messageId)) throw new ApiError(400, 'Invalid message id');
@@ -21,6 +26,32 @@ async function loadParticipantMessage(userId: string, messageId: string) {
   if (!isParticipant) throw new ApiError(403, 'Not allowed');
   return { msg, conv };
 }
+
+// ---------- SEARCH MESSAGES IN A CONVERSATION ----------
+const searchQuery = z.object({
+  conversationId: z.string().regex(/^[a-f\d]{24}$/i),
+  q: z.string().min(1).max(100),
+});
+
+router.get(
+  '/search',
+  requireAuth,
+  validate(searchQuery, 'query'),
+  asyncHandler(async (req: Request, res: Response) => {
+    const conversationId = String(req.query.conversationId);
+    const conv = await Conversation.findById(conversationId).lean();
+    if (!conv) throw new ApiError(404, 'Conversation not found');
+    const isParticipant = conv.participants.some((p) => String(p) === req.userId);
+    if (!isParticipant) throw new ApiError(403, 'You are not a participant of this conversation');
+
+    const rx = new RegExp(escapeRegex(String(req.query.q).trim()), 'i');
+    const messages = await Message.find({ conversationId: conv._id, isDeleted: false, text: rx })
+      .sort({ createdAt: -1 })
+      .limit(30)
+      .lean();
+    res.json({ messages });
+  })
+);
 
 // ---------- EDIT (owner only) ----------
 const editSchema = z.object({ text: z.string().min(1).max(4000) });
@@ -58,10 +89,16 @@ router.delete(
       throw new ApiError(403, 'You can only delete your own messages');
     }
 
+    // Purge attachments too — a deleted message must not leave a live media URL.
+    const attached = msg.attachments ?? [];
     msg.isDeleted = true;
     msg.deletedAt = new Date();
     msg.text = '';
+    msg.attachments = [];
     await msg.save();
+    for (const p of attached) {
+      if (p.publicId) void deleteAsset(p.publicId, p.kind === 'audio' ? 'audio' : 'image');
+    }
     res.json({ ok: true });
   })
 );

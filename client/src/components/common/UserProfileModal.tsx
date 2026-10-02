@@ -35,13 +35,13 @@ export default function UserProfileModal({ userId, onClose }: Props) {
   const startChat = useMutation({
     mutationFn: async (username: string) => {
       const res = await api.post('/chats/direct', { username });
-      return res.data as { conversation: { id: string } };
+      return res.data as { conversation: { id: string; other?: PublicUser } };
     },
     onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: ['chats'] });
       onClose();
       navigate('/app/chats');
-      useUi.getState().requestOpenConversation(data.conversation.id);
+      useUi.getState().requestOpenConversation(data.conversation.id, data.conversation.other);
     },
     onError: (e) => setError(apiError(e)),
   });

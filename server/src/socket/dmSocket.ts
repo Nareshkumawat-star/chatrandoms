@@ -1,9 +1,10 @@
 import type { Server, Socket } from 'socket.io';
-import { Message, type MessageDoc } from '../models/Message.js';
+import { Message, type Attachment, type MessageDoc } from '../models/Message.js';
 import { Conversation, makeDirectKey } from '../models/Conversation.js';
 import { User } from '../models/User.js';
 import { sanitizeText } from '../utils/text.js';
 import { hit } from '../lib/rateLimiter.js';
+import { deleteAsset, uploadAudio, uploadPhoto } from '../lib/cloudinary.js';
 import { config } from '../config/env.js';
 import { logger } from '../lib/logger.js';
 
@@ -45,9 +46,39 @@ export function registerDmHandlers(io: Server, socket: Socket) {
       if (ctx.role === 'guest') {
         return ack?.({ error: 'Create an account to start private chats.' });
       }
-      const body = (raw ?? {}) as { conversationId?: string; text?: string; replyTo?: string };
+      const body = (raw ?? {}) as {
+        conversationId?: string;
+        text?: string;
+        replyTo?: string;
+        image?: { dataUrl?: string; name?: string };
+        voice?: { dataUrl?: string; name?: string; durationMs?: number; mime?: string };
+      };
       const text = sanitizeText(body.text, 4000);
-      if (!text) return ack?.({ error: 'Message cannot be empty' });
+
+      // Optional attachments — validated here, uploaded server-side, so
+      // clients can only ever store URLs that came out of our own pipeline.
+      const rawImage = typeof body.image?.dataUrl === 'string' ? body.image.dataUrl : '';
+      const rawVoice = typeof body.voice?.dataUrl === 'string' ? body.voice.dataUrl : '';
+      if (rawImage && rawVoice) {
+        return ack?.({ error: 'Attach a photo or a voice message, not both' });
+      }
+      if (rawImage) {
+        if (!/^data:image\/(jpe?g|png|webp|gif|avif);base64,/i.test(rawImage)) {
+          return ack?.({ error: 'Only JPG, PNG, WEBP, GIF or AVIF images are allowed' });
+        }
+        if (rawImage.length > 700_000) {
+          return ack?.({ error: 'Image is too large — pick a smaller photo' });
+        }
+      }
+      if (rawVoice) {
+        if (!/^data:audio\/[a-z0-9.+-]+(?:;[a-z0-9=+.-]+)*;base64,/i.test(rawVoice)) {
+          return ack?.({ error: 'Unsupported voice recording format' });
+        }
+        if (rawVoice.length > 1_300_000) {
+          return ack?.({ error: 'Voice message is too long — record a shorter clip' });
+        }
+      }
+      if (!text && !rawImage && !rawVoice) return ack?.({ error: 'Message cannot be empty' });
 
       const conv = await loadAuthorizedConversation(ctx.userId, String(body.conversationId));
       if (!conv) return ack?.({ error: 'Conversation not found' });
@@ -79,18 +110,54 @@ export function registerDmHandlers(io: Server, socket: Socket) {
         replyTo = parent ? String(parent._id) : null;
       }
 
+      let attachments: Attachment[] = [];
+      if (rawImage) {
+        const imgRl = hit(`dimg:${ctx.userId}`, 20, 60_000);
+        if (!imgRl.ok) return ack?.({ error: 'Too many photo uploads — try again shortly' });
+        const { url, publicId } = await uploadPhoto(rawImage, 'pulse-chat/dm');
+        attachments = [
+          {
+            kind: 'image',
+            url,
+            publicId: publicId ?? undefined,
+            name: sanitizeText(body.image?.name, 80) || 'photo',
+          },
+        ];
+      } else if (rawVoice) {
+        const voiceRl = hit(`dvoice:${ctx.userId}`, 20, 60_000);
+        if (!voiceRl.ok) return ack?.({ error: 'Too many voice uploads — try again shortly' });
+        const { url, publicId } = await uploadAudio(rawVoice, 'pulse-chat/voice');
+        const durationMs = Math.max(0, Math.min(180_000, Math.round(Number(body.voice?.durationMs) || 0)));
+        attachments = [
+          {
+            kind: 'audio',
+            url,
+            publicId: publicId ?? undefined,
+            name: sanitizeText(body.voice?.name, 80) || 'Voice message',
+            durationMs,
+            mime: sanitizeText(body.voice?.mime, 60) || undefined,
+          },
+        ];
+      }
+
       const doc = await Message.create({
         conversationId: conv._id,
         senderId: ctx.userId,
         receiverId,
         text,
-        type: 'text',
+        type: attachments.length ? (rawVoice ? 'voice' : 'image') : 'text',
+        attachments,
         replyTo,
       });
 
       const payload = messagePayload(doc);
 
-      conv.lastMessage = { text, senderId: doc.senderId, at: doc.createdAt };
+      // Conversation list preview: a media-only message still needs a label.
+      conv.lastMessage = {
+        text: text || (rawVoice ? '🎤 Voice message' : '📷 Photo'),
+        senderId: doc.senderId,
+        at: doc.createdAt,
+      };
       conv.lastMessageAt = doc.createdAt;
       await conv.save();
 
@@ -212,10 +279,16 @@ export function registerDmHandlers(io: Server, socket: Socket) {
       const conv = await loadAuthorizedConversation(ctx.userId, String(msg.conversationId));
       if (!conv) return ack?.({ error: 'Conversation not found' });
 
+      // Purge attachments too — a deleted message must not leave a live media URL.
+      const attached = msg.attachments ?? [];
       msg.isDeleted = true;
       msg.deletedAt = new Date();
       msg.text = '';
+      msg.attachments = [];
       await msg.save();
+      for (const p of attached) {
+        if (p.publicId) void deleteAsset(p.publicId, p.kind === 'audio' ? 'audio' : 'image');
+      }
 
       for (const p of conv.participants) {
         nsp.to(`user:${String(p)}`).emit('dm:delete', {

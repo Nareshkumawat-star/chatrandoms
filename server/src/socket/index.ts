@@ -61,6 +61,7 @@ export function initSockets(io: Server) {
     }
 
     socket.join('global-chat'); // the ONE worldwide room
+    socket.join(`user:${payload.sub}`); // personal room (mentions / targeted events)
 
     registerGlobalHandlers(io, socket);
 

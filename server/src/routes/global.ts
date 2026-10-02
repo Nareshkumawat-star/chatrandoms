@@ -7,11 +7,16 @@ import { requireAuth, optionalAuth } from '../middleware/auth.js';
 import { validate, asyncHandler } from '../middleware/validate.js';
 import { ApiError } from '../middleware/errors.js';
 import { sanitizeText } from '../utils/text.js';
+import { resolveMentions } from '../utils/mentions.js';
 import { hit } from '../lib/rateLimiter.js';
-import { getOnlineCount } from '../services/presence.js';
+import { getOnlineCount, getIo } from '../services/presence.js';
 import type { Request, Response } from 'express';
 
 const router = Router();
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 // ---------- FEED ----------
 const feedQuery = z.object({
@@ -96,6 +101,8 @@ router.post(
     const ttl = Number(req.body.ttlMinutes ?? 0);
     const expiresAt = ttl > 0 ? new Date(Date.now() + Math.min(ttl, 1440) * 60_000) : null;
 
+    const mentions = await resolveMentions(text, req.userId!);
+
     const doc = await GlobalMessage.create({
       senderId: req.userId as never,
       senderUsername: user.username,
@@ -106,10 +113,42 @@ router.post(
       kind,
       replyToId: req.body.replyToId && replySnapshot ? (req.body.replyToId as never) : null,
       replySnapshot,
+      mentions,
       expiresAt,
     });
 
+    // Targeted @mention ping over the global namespace's personal rooms.
+    const gNsp = getIo()?.of('/global');
+    if (gNsp) {
+      for (const mt of mentions) {
+        gNsp.to(`user:${mt.userId}`).emit('global:mention', {
+          messageId: String(doc._id),
+          text: text.slice(0, 200),
+          from: anonymous
+            ? null
+            : { id: req.userId, username: user.username, displayName: user.displayName, avatar: user.avatar },
+        });
+      }
+    }
+
     res.status(201).json({ message: doc });
+  })
+);
+
+// ---------- SEARCH GLOBAL MESSAGES ----------
+const searchQuery = z.object({ q: z.string().min(1).max(100) });
+
+router.get(
+  '/search',
+  optionalAuth,
+  validate(searchQuery, 'query'),
+  asyncHandler(async (req: Request, res: Response) => {
+    const rx = new RegExp(escapeRegex(String(req.query.q).trim()), 'i');
+    const messages = await GlobalMessage.find({ isDeleted: false, text: rx })
+      .sort({ createdAt: -1 })
+      .limit(30)
+      .lean();
+    res.json({ messages });
   })
 );
 

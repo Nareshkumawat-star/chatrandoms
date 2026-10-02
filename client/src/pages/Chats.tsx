@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  Search, MessageCircle, Lock, ArrowLeft, ShieldBan, VolumeX, X, UserSearch, ChevronLeft, Send, Smile, MoreVertical, Check, Plus, ShieldOff, Pencil, Trash2, Flag,
+  Search, MessageCircle, Lock, ArrowLeft, ShieldBan, VolumeX, X, UserSearch, ChevronLeft, Send, Smile, MoreVertical, Check, Plus, ShieldOff, Pencil, Trash2, Flag, Paperclip, Mic, Square, Play, Pause,
 } from 'lucide-react';
 import { api, apiError } from '../lib/api';
 import { getDmSocket } from '../lib/socket';
@@ -16,6 +16,95 @@ import UserProfileModal from '../components/common/UserProfileModal';
 import { playSentTick } from '../lib/sound';
 
 const QUICK_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🎉'];
+
+type PendingImage = { dataUrl: string; name: string };
+type PendingVoice = { dataUrl: string; name: string; durationMs: number };
+
+// Photo messages ride the dm:send socket payload, so images are downscaled and
+// re-encoded until they fit comfortably under the server's cap.
+const IMAGE_BYTE_CAP = 680_000;
+// Voice notes are opus-encoded at 32kbps: 3 minutes ≈ 960KB base64.
+const VOICE_BYTE_CAP = 1_150_000;
+const MAX_RECORD_MS = 180_000;
+const VOICE_MIME_CANDIDATES = [
+  'audio/webm;codecs=opus',
+  'audio/webm',
+  'audio/mp4',
+  'audio/ogg;codecs=opus',
+];
+
+function pickVoiceMime(): string | undefined {
+  if (typeof MediaRecorder === 'undefined') return undefined;
+  return VOICE_MIME_CANDIDATES.find((m) => MediaRecorder.isTypeSupported(m));
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(new Error('Could not read the recording'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function fmtClock(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+async function compressImage(file: File): Promise<PendingImage> {
+  if (!file.type.startsWith('image/')) throw new Error('That file is not an image');
+  if (file.size > 15_000_000) throw new Error('Image is too large (max 15MB)');
+
+  const raw = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(new Error('Could not read that file'));
+    reader.readAsDataURL(file);
+  });
+
+  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const el = new Image();
+    el.onload = () => resolve(el);
+    el.onerror = () => reject(new Error('Could not load that image'));
+    el.src = raw;
+  });
+
+  const render = (max: number, quality: number): string | null => {
+    try {
+      const scale = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+      const w = Math.max(1, Math.round(img.naturalWidth * scale));
+      const h = Math.max(1, Math.round(img.naturalHeight * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return null;
+      ctx.drawImage(img, 0, 0, w, h);
+      return canvas.toDataURL('image/jpeg', quality);
+    } catch {
+      return null; // exotic formats can taint the canvas — handled by the fallback below
+    }
+  };
+
+  for (const max of [1600, 1280, 1024]) {
+    for (const quality of [0.82, 0.65, 0.5]) {
+      const out = render(max, quality);
+      if (out && out.length <= IMAGE_BYTE_CAP) return { dataUrl: out, name: file.name || 'photo' };
+    }
+  }
+  if (raw.length <= IMAGE_BYTE_CAP) return { dataUrl: raw, name: file.name || 'photo' };
+  throw new Error('Could not compress that photo enough — try a smaller image');
+}
+
+function messagePreview(m: ChatMessage): string {
+  if (m.text) return m.text;
+  if (m.attachments?.some((a) => a.kind === 'audio')) return '🎤 Voice message';
+  if (m.attachments?.length) return '📷 Photo';
+  return '';
+}
 
 export default function Chats() {
   const qc = useQueryClient();
@@ -38,11 +127,23 @@ export default function Chats() {
   const [nextBefore, setNextBefore] = useState<string | null>(null);
   const [emojiFor, setEmojiFor] = useState<string | null>(null);
   const [newChatOpen, setNewChatOpen] = useState(false);
+  const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
+  const [pendingVoice, setPendingVoice] = useState<PendingVoice | null>(null);
+  const [recording, setRecording] = useState(false);
+  const [recordMs, setRecordMs] = useState(0);
+  const [sendingMedia, setSendingMedia] = useState(false);
   const [blockedState, setBlockedState] = useState<{ blockedMe: boolean; iBlocked: boolean }>({ blockedMe: false, iBlocked: false });
 
   const endRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const imageRef = useRef<HTMLInputElement>(null);
   const typingGuard = useRef<number>(0);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const recTimerRef = useRef<number | null>(null);
+  const recStartRef = useRef(0);
+  const recCancelledRef = useRef(false);
 
   // ---------- debounced username search (Chats section ONLY) ----------
   useEffect(() => {
@@ -91,8 +192,16 @@ export default function Chats() {
         ('other' in conv && conv.other ? (conv as ConversationSummary) : null) ??
         chatsQuery.data?.items.find((c) => c.id === conv.id) ??
         null;
+      const otherInfo = summary?.other ?? conv.other ?? null;
       setActiveConv(
-        summary ?? ({ id: conv.id, other: null, lastMessage: null, lastMessageAt: null, unread: 0 } as ConversationSummary)
+        summary ??
+          ({
+            id: conv.id,
+            other: otherInfo,
+            lastMessage: null,
+            lastMessageAt: null,
+            unread: 0,
+          } as ConversationSummary)
       );
       setMessages([]);
       setNextBefore(null);
@@ -107,8 +216,10 @@ export default function Chats() {
         setError('Could not load messages');
       }
       // fetch relationship for blocked-state banner
-      if (summary?.other?.id) {
-        api.get(`/users/${summary.other.id}`)
+      const targetId = otherInfo?.id;
+      if (targetId) {
+        api
+          .get(`/users/${targetId}`)
           .then(({ data }) => setBlockedState(data.viewerRelationship ?? { blockedMe: false, iBlocked: false }))
           .catch(() => undefined);
       } else {
@@ -122,7 +233,7 @@ export default function Chats() {
   const openRequest = useUi((s) => s.openRequest);
   useEffect(() => {
     if (!openRequest) return;
-    openConversation({ id: openRequest.id });
+    openConversation({ id: openRequest.id, other: openRequest.other });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openRequest?.nonce]);
 
@@ -205,8 +316,9 @@ export default function Chats() {
 
   const send = () => {
     const text = input.trim();
-    if (!text || !activeConv) return;
+    if (!activeConv || sendingMedia) return;
     if (editing) {
+      if (!text) return;
       dm.emit('dm:edit', { messageId: editing._id, text }, (res: { error?: string }) => {
         if (res?.error) setError(res.error);
         setEditing(null);
@@ -214,6 +326,42 @@ export default function Chats() {
       });
       return;
     }
+
+    const media = pendingImage
+      ? { image: { dataUrl: pendingImage.dataUrl, name: pendingImage.name } }
+      : pendingVoice
+        ? {
+            voice: {
+              dataUrl: pendingVoice.dataUrl,
+              name: pendingVoice.name,
+              durationMs: pendingVoice.durationMs,
+            },
+          }
+        : null;
+    if (!text && !media) return;
+
+    if (media) {
+      // Media sends wait on the ack so a failed upload keeps it in the composer.
+      setSendingMedia(true);
+      dm.emit(
+        'dm:send',
+        { conversationId: activeConv.id, text, replyTo: replyTo?._id, ...media },
+        (res: { error?: string }) => {
+          setSendingMedia(false);
+          if (res?.error) {
+            setError(res.error);
+            return;
+          }
+          playSentTick();
+          setInput('');
+          setReplyTo(null);
+          setPendingImage(null);
+          setPendingVoice(null);
+        }
+      );
+      return;
+    }
+
     dm.emit('dm:send', { conversationId: activeConv.id, text, replyTo: replyTo?._id }, (res: { error?: string }) => {
       if (res?.error) setError(res.error);
     });
@@ -221,6 +369,151 @@ export default function Chats() {
     setInput('');
     setReplyTo(null);
   };
+
+  const composerDisabled =
+    !activeConv?.other ||
+    activeConv.other.isGuest ||
+    blockedState.iBlocked ||
+    blockedState.blockedMe;
+
+  // WhatsApp-style: the trailing button is the mic whenever there's nothing to send yet.
+  const showMic = !recording && !input.trim() && !pendingImage && !pendingVoice && !sendingMedia;
+
+  const pickImage = (file?: File) => {
+    if (!file) return;
+    setError('');
+    compressImage(file)
+      .then((img) => {
+        setPendingVoice(null);
+        setPendingImage(img);
+      })
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Could not attach that image'));
+  };
+
+  // ---------- voice recording ----------
+  const stopTracks = () => {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+  };
+
+  const clearRecTimer = () => {
+    if (recTimerRef.current !== null) {
+      window.clearInterval(recTimerRef.current);
+      recTimerRef.current = null;
+    }
+  };
+
+  const stopRecording = () => {
+    const rec = recorderRef.current;
+    if (rec && rec.state !== 'inactive') {
+      rec.stop(); // onstop does the saving
+      return;
+    }
+    clearRecTimer();
+    stopTracks();
+    setRecording(false);
+  };
+
+  const cancelRecording = () => {
+    recCancelledRef.current = true;
+    stopRecording();
+  };
+
+  const startRecording = async () => {
+    if (composerDisabled || recording || sendingMedia) return;
+    setError('');
+    if (typeof MediaRecorder === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      setError('Voice messages are not supported in this browser');
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = pickVoiceMime();
+      const rec = new MediaRecorder(
+        stream,
+        mime ? { mimeType: mime, audioBitsPerSecond: 32_000 } : { audioBitsPerSecond: 32_000 }
+      );
+      chunksRef.current = [];
+      recCancelledRef.current = false;
+
+      rec.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
+      };
+      rec.onstop = async () => {
+        const cancelled = recCancelledRef.current;
+        const durationMs = Date.now() - recStartRef.current;
+        const chunks = chunksRef.current;
+        chunksRef.current = [];
+        clearRecTimer();
+        stopTracks();
+        recorderRef.current = null;
+        setRecording(false);
+        setRecordMs(0);
+        if (cancelled) return;
+        try {
+          const blob = new Blob(chunks, { type: rec.mimeType || 'audio/webm' });
+          if (!blob.size) {
+            setError('Nothing was recorded — please try again');
+            return;
+          }
+          const dataUrl = await blobToDataUrl(blob);
+          if (dataUrl.length > VOICE_BYTE_CAP) {
+            setError('Voice message is too long — record a shorter clip');
+            return;
+          }
+          setPendingImage(null);
+          setPendingVoice({ dataUrl, name: 'Voice message', durationMs: Math.max(600, durationMs) });
+        } catch {
+          setError('Could not process that recording');
+        }
+      };
+
+      streamRef.current = stream;
+      recorderRef.current = rec;
+      setPendingImage(null);
+      setRecording(true);
+      setRecordMs(0);
+      recStartRef.current = Date.now();
+      rec.start();
+      recTimerRef.current = window.setInterval(() => {
+        const elapsed = Date.now() - recStartRef.current;
+        if (elapsed >= MAX_RECORD_MS) {
+          stopRecording(); // auto-stop at the 3 minute cap, then it's ready to send
+          return;
+        }
+        setRecordMs(elapsed);
+      }, 250);
+    } catch (e) {
+      clearRecTimer();
+      stopTracks();
+      recorderRef.current = null;
+      setRecording(false);
+      setError(
+        e instanceof Error && e.name === 'NotAllowedError'
+          ? 'Microphone access denied — allow the mic for this site'
+          : 'Could not access the microphone'
+      );
+    }
+  };
+
+  // Never leave a microphone stream open: unmount, or jump to another chat.
+  useEffect(() => {
+    return () => {
+      recCancelledRef.current = true;
+      if (recTimerRef.current !== null) window.clearInterval(recTimerRef.current);
+      const rec = recorderRef.current;
+      if (rec && rec.state !== 'inactive') rec.stop();
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+    };
+  }, []);
+
+  // A pending attachment or live recording shouldn't outlive a conversation switch.
+  useEffect(() => {
+    cancelRecording();
+    setPendingImage(null);
+    setPendingVoice(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeConv?.id]);
 
   const loadOlder = async () => {
     if (!activeConv || !nextBefore || loadingOlder) return;
@@ -536,7 +829,32 @@ export default function Chats() {
                         <div className="text-[var(--wa-green-hover)] font-medium text-[12px]">
                           {parent.senderId === me?.id ? 'You' : activeConv.other?.displayName}
                         </div>
-                        <div className="text-[var(--wa-text-2)] truncate text-[12px]">{parent.text}</div>
+                        <div className="text-[var(--wa-text-2)] truncate text-[12px]">{messagePreview(parent)}</div>
+                      </div>
+                    )}
+                    {!m.isDeleted && m.attachments && m.attachments.length > 0 && (
+                      <div className="mb-1 space-y-1">
+                        {m.attachments.map((a) =>
+                          a.kind === 'audio' ? (
+                            <VoicePlayer key={a.url} src={a.url} durationMs={a.durationMs} />
+                          ) : (
+                            <a
+                              key={a.url}
+                              href={a.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="block"
+                              title={a.name || 'Open photo'}
+                            >
+                              <img
+                                src={a.url}
+                                alt={a.name || 'Photo'}
+                                loading="lazy"
+                                className="block w-[min(300px,55vw)] max-w-full rounded-lg border border-white/10 bg-black/20 object-cover"
+                              />
+                            </a>
+                          )
+                        )}
                       </div>
                     )}
                     <span>{m.isDeleted ? <i className="opacity-60">🚫 This message was deleted</i> : m.text}</span>
@@ -582,17 +900,19 @@ export default function Chats() {
                         </button>
                         {mine && (
                           <>
-                            <button
-                              className="p-1 text-[var(--wa-text-2)] hover:text-amber-300"
-                              title="Edit"
-                              onClick={() => {
-                                setEditing(m);
-                                setInput(m.text);
-                                inputRef.current?.focus();
-                              }}
-                            >
-                              <Pencil size={12} />
-                            </button>
+                            {!!m.text && (
+                              <button
+                                className="p-1 text-[var(--wa-text-2)] hover:text-amber-300"
+                                title="Edit"
+                                onClick={() => {
+                                  setEditing(m);
+                                  setInput(m.text);
+                                  inputRef.current?.focus();
+                                }}
+                              >
+                                <Pencil size={12} />
+                              </button>
+                            )}
                             <button
                               className="p-1 text-[var(--wa-text-2)] hover:text-rose-400"
                               title="Delete"
@@ -636,7 +956,7 @@ export default function Chats() {
               <div className="text-[var(--wa-green-hover)] font-medium text-[12px]">
                 {replyTo.senderId === me?.id ? 'You' : activeConv.other?.displayName}
               </div>
-              <div className="text-[var(--wa-text-2)] truncate">{replyTo.text}</div>
+              <div className="text-[var(--wa-text-2)] truncate">{messagePreview(replyTo)}</div>
             </div>
             <button className="text-[var(--wa-text-2)] hover:text-[var(--wa-text)]" onClick={() => setReplyTo(null)}>
               <X size={16} />
@@ -652,7 +972,98 @@ export default function Chats() {
           </div>
         )}
         {error && <p className="text-[12px] text-rose-400 mb-1.5">{error}</p>}
+        {pendingImage && (
+          <div className="mb-2 flex items-center gap-2 text-[12.5px] bg-[var(--wa-panel-2)] border-l-[3px] border-sky-400 rounded-lg px-3 py-2">
+            <img
+              src={pendingImage.dataUrl}
+              alt="Attachment preview"
+              className="w-10 h-10 rounded-md object-cover shrink-0 border border-[var(--wa-border)]"
+            />
+            <div className="flex-1 min-w-0">
+              <div className="text-sky-300 font-medium text-[12px]">
+                {sendingMedia ? 'Sending photo…' : 'Photo attached'}
+              </div>
+              <div className="text-[var(--wa-text-2)] truncate">{pendingImage.name}</div>
+            </div>
+            <button
+              className="text-[var(--wa-text-2)] hover:text-[var(--wa-text)] disabled:opacity-40"
+              title="Remove photo"
+              disabled={sendingMedia}
+              onClick={() => setPendingImage(null)}
+            >
+              <X size={16} />
+            </button>
+          </div>
+        )}
+        {pendingVoice && (
+          <div className="mb-2 flex items-center gap-2 text-[12.5px] bg-[var(--wa-panel-2)] border-l-[3px] border-emerald-400 rounded-lg px-3 py-2">
+            <div className="flex-1 min-w-0">
+              <div className="text-emerald-300 font-medium text-[12px] mb-1.5">
+                {sendingMedia ? 'Sending voice message…' : 'Voice message ready'}
+              </div>
+              <VoicePlayer src={pendingVoice.dataUrl} durationMs={pendingVoice.durationMs} />
+            </div>
+            <button
+              className="text-[var(--wa-text-2)] hover:text-[var(--wa-text)] disabled:opacity-40"
+              title="Discard voice message"
+              disabled={sendingMedia}
+              onClick={() => setPendingVoice(null)}
+            >
+              <X size={16} />
+            </button>
+          </div>
+        )}
         <div className="flex items-center gap-2">
+          {recording ? (
+            <>
+              <button
+                className="w-10 h-10 rounded-full flex items-center justify-center text-rose-300 hover:bg-rose-500/15 transition"
+                title="Discard recording"
+                onClick={cancelRecording}
+              >
+                <X size={22} />
+              </button>
+              <div className="flex-1 min-w-0 flex items-center gap-2.5 wa-glass-input rounded-xl px-3 py-2.5">
+                <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse shrink-0" />
+                <span className="text-[13.5px] font-medium text-rose-300 tabular-nums shrink-0">
+                  {fmtClock(recordMs)}
+                </span>
+                <div className="flex-1 h-1.5 rounded-full bg-black/25 overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-rose-400 transition-[width] duration-200"
+                    style={{ width: `${Math.min(100, (recordMs / MAX_RECORD_MS) * 100)}%` }}
+                  />
+                </div>
+                <span className="text-[11px] text-[var(--wa-text-2)] shrink-0 hidden sm:inline">recording</span>
+              </div>
+              <button
+                className="w-10 h-10 rounded-full bg-[var(--wa-green)] text-[#0b141a] flex items-center justify-center hover:bg-[var(--wa-green-hover)] transition"
+                title="Stop — ready to send"
+                onClick={stopRecording}
+              >
+                <Square size={15} fill="currentColor" />
+              </button>
+            </>
+          ) : (
+            <>
+          <button
+            className="w-10 h-10 rounded-full flex items-center justify-center text-[var(--wa-text-2)] hover:bg-[var(--wa-active)] hover:text-[var(--wa-text)] transition disabled:opacity-40"
+            title="Attach photo"
+            onClick={() => imageRef.current?.click()}
+            disabled={composerDisabled || sendingMedia}
+          >
+            <Paperclip size={22} />
+          </button>
+          <input
+            ref={imageRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(e) => {
+              pickImage(e.target.files?.[0]);
+              e.target.value = '';
+            }}
+          />
           <button
             className="w-10 h-10 rounded-full flex items-center justify-center text-[var(--wa-text-2)] hover:bg-[var(--wa-active)] hover:text-[var(--wa-text)] transition"
             title="Emoji"
@@ -706,14 +1117,27 @@ export default function Chats() {
               }
             }}
           />
-          <button
-            className="w-10 h-10 rounded-full bg-gradient-to-b from-[#06d6a0] to-[var(--wa-green)] text-[#0b141a] flex items-center justify-center shadow-[0_0_16px_rgba(0,168,132,0.35)] hover:shadow-[0_0_22px_rgba(6,207,156,0.5)] hover:scale-105 active:scale-95 transition disabled:opacity-40"
-            onClick={send}
-            disabled={!input.trim()}
-            title="Send"
-          >
-            <Send size={18} />
-          </button>
+          {showMic ? (
+            <button
+              className="w-10 h-10 rounded-full bg-gradient-to-b from-[#06d6a0] to-[var(--wa-green)] text-[#0b141a] flex items-center justify-center shadow-[0_0_16px_rgba(0,168,132,0.35)] hover:shadow-[0_0_22px_rgba(6,207,156,0.5)] hover:scale-105 active:scale-95 transition disabled:opacity-40"
+              onClick={startRecording}
+              disabled={composerDisabled || sendingMedia}
+              title="Record voice message"
+            >
+              <Mic size={20} />
+            </button>
+          ) : (
+            <button
+              className="w-10 h-10 rounded-full bg-gradient-to-b from-[#06d6a0] to-[var(--wa-green)] text-[#0b141a] flex items-center justify-center shadow-[0_0_16px_rgba(0,168,132,0.35)] hover:shadow-[0_0_22px_rgba(6,207,156,0.5)] hover:scale-105 active:scale-95 transition disabled:opacity-40"
+              onClick={send}
+              disabled={composerDisabled || sendingMedia || (!input.trim() && !pendingImage && !pendingVoice)}
+              title="Send"
+            >
+              <Send size={18} />
+            </button>
+          )}
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -740,11 +1164,94 @@ export default function Chats() {
 
   return (
     <div className="flex-1 min-w-0 flex flex-col h-full overflow-hidden">
-      <div className="flex-1 min-h-0 flex overflow-hidden">
-      {/* The list pane is ALWAYS visible on desktop so username search is never missing */}
-      <div className={`${activeConv ? 'hidden md:flex' : 'flex'} h-full w-full md:w-auto`}>{listPane}</div>
       {chatPane}
       <UserProfileModal userId={profileId} onClose={() => setProfileId(null)} />
+    </div>
+  );
+}
+
+function VoicePlayer({ src, durationMs }: { src: string; durationMs?: number }) {
+  const [playing, setPlaying] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [total, setTotal] = useState(durationMs ?? 0);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const totalRef = useRef(durationMs ?? 0);
+
+  useEffect(() => {
+    totalRef.current = durationMs ?? 0;
+    setTotal(durationMs ?? 0);
+  }, [durationMs]);
+
+  // A playing clip must stop when the row unmounts.
+  useEffect(() => {
+    return () => {
+      audioRef.current?.pause();
+    };
+  }, []);
+
+  const ensureAudio = () => {
+    if (audioRef.current) return audioRef.current;
+    const a = new Audio(src);
+    a.preload = 'metadata';
+    a.addEventListener('loadedmetadata', () => {
+      if (Number.isFinite(a.duration) && a.duration > 0 && !totalRef.current) {
+        const ms = Math.round(a.duration * 1000);
+        totalRef.current = ms;
+        setTotal(ms);
+      }
+    });
+    a.addEventListener('timeupdate', () => {
+      const durSec =
+        a.duration && Number.isFinite(a.duration) && a.duration > 0
+          ? a.duration
+          : totalRef.current / 1000;
+      setProgress(durSec ? Math.min(1, a.currentTime / durSec) : 0);
+    });
+    a.addEventListener('ended', () => {
+      setPlaying(false);
+      setProgress(0);
+    });
+    audioRef.current = a;
+    return a;
+  };
+
+  const toggle = () => {
+    const a = ensureAudio();
+    if (playing) {
+      a.pause();
+      setPlaying(false);
+      return;
+    }
+    a.play()
+      .then(() => setPlaying(true))
+      .catch(() => setPlaying(false));
+  };
+
+  return (
+    <div className="flex items-center gap-2.5 min-w-[190px] py-0.5">
+      <button
+        type="button"
+        className="w-9 h-9 rounded-full bg-white/15 hover:bg-white/25 flex items-center justify-center shrink-0 transition"
+        title={playing ? 'Pause' : 'Play voice message'}
+        onClick={toggle}
+      >
+        {playing ? (
+          <Pause size={14} fill="currentColor" />
+        ) : (
+          <Play size={14} fill="currentColor" className="ml-0.5" />
+        )}
+      </button>
+      <div className="flex-1 min-w-0">
+        <div className="h-1.5 rounded-full bg-white/15 overflow-hidden">
+          <div
+            className="h-full rounded-full bg-[var(--wa-green-hover)] transition-[width] duration-150"
+            style={{ width: `${Math.round(progress * 100)}%` }}
+          />
+        </div>
+        <div className="mt-1 text-[10.5px] tabular-nums opacity-70 flex items-center gap-1">
+          <Mic size={10} className="opacity-70" />
+          {fmtClock(progress * total)} / {fmtClock(total)}
+        </div>
       </div>
     </div>
   );

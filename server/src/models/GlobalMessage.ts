@@ -12,6 +12,7 @@ export interface GlobalMessageDoc extends mongoose.Document {
   reactors: { userId: mongoose.Types.ObjectId; emoji: string }[];
   replyToId: mongoose.Types.ObjectId | null;
   replySnapshot: { id: string; username: string; text: string } | null;
+  mentions: { userId: mongoose.Types.ObjectId; username: string }[];
   expiresAt: Date | null; // expiring messages
   isDeleted: boolean;
   deletedAt: Date | null;
@@ -50,6 +51,12 @@ const GlobalMessageSchema = new Schema<GlobalMessageDoc>(
       username: { type: String },
       text: { type: String, default: '' },
     },
+    mentions: [
+      {
+        userId: { type: Schema.Types.ObjectId, ref: 'User' },
+        username: { type: String },
+      },
+    ],
     expiresAt: { type: Date, default: null },
     isDeleted: { type: Boolean, default: false },
     deletedAt: { type: Date, default: null },
@@ -63,6 +70,7 @@ const GlobalMessageSchema = new Schema<GlobalMessageDoc>(
 
 // Cursor-based pagination: query older than cursor.
 GlobalMessageSchema.index({ createdAt: -1 });
+GlobalMessageSchema.index({ 'mentions.userId': 1 });
 GlobalMessageSchema.index({ kind: 1, createdAt: -1 });
 GlobalMessageSchema.index({ score: -1, createdAt: -1 });
 // TTL index — expiring messages are removed automatically.

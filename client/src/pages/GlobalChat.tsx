@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  Flame, Timer, EyeOff, SlidersHorizontal, TrendingUp, Flag, CornerUpLeft,
-  Pencil, Trash2, Sparkles, Activity, Globe, Send, X, Smile,
+  Timer, EyeOff, Flag, CornerUpLeft,
+  Pencil, Trash2, Send, X, Smile,
 } from 'lucide-react';
 import { api, apiError } from '../lib/api';
 import { getGlobalSocket } from '../lib/socket';
@@ -11,9 +11,7 @@ import { useAuth } from '../store/auth';
 import type { GlobalMessage as GMsg, GlobalMeta } from '../types';
 import Avatar, { colorFor } from '../components/common/Avatar';
 import DateChip, { dayLabel } from '../components/common/DateChip';
-import Modal from '../components/common/Modal';
 import GlowButton from '../components/uiverse/GlowButton';
-import Toggle from '../components/uiverse/Toggle';
 import { Spinner } from '../components/uiverse/Spinner';
 import UserProfileModal from '../components/common/UserProfileModal';
 
@@ -31,9 +29,6 @@ export default function GlobalChat() {
   const [editing, setEditing] = useState<GMsg | null>(null);
   const [ttl, setTtl] = useState(0);
   const [anonymous, setAnonymous] = useState(false);
-  const [filterOpen, setFilterOpen] = useState(false);
-  const [noiseLevel, setNoiseLevel] = useState(me?.noiseFilterLevel ?? 0);
-  const [hideQuestions, setHideQuestions] = useState(false);
   const [storm, setStorm] = useState<{ id: number; emoji: string; x: number }[]>([]);
   const [typing, setTyping] = useState<Record<string, string>>({});
   const [profileId, setProfileId] = useState<string | null>(null);
@@ -127,20 +122,7 @@ export default function GlobalChat() {
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages.length]);
 
-  useEffect(() => {
-    if (noiseLevel !== (me?.noiseFilterLevel ?? 0)) {
-      api.patch('/users/me', { noiseFilterLevel: noiseLevel }).catch(() => undefined);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [noiseLevel]);
-
-  const visible = useMemo(() => {
-    let list = messages.filter((m) => !m.isDeleted);
-    if (hideQuestions) list = list.filter((m) => m.kind !== 'question');
-    if (noiseLevel >= 1) list = list.filter((m) => m.score > 0 || m.senderId === me?.id);
-    if (noiseLevel >= 3) list = list.filter((m) => m.kind === 'question' || m.score >= 6);
-    return list;
-  }, [messages, hideQuestions, noiseLevel, me?.id]);
+  const visible = useMemo(() => messages.filter((m) => !m.isDeleted), [messages]);
 
   const send = useCallback(() => {
     const text = input.trim();
@@ -235,29 +217,12 @@ export default function GlobalChat() {
             <span className="hidden min-[420px]:inline">{meta?.onlineCount ?? '—'} online · </span>one chat for the whole world
           </p>
         </div>
-        <div className="ml-auto flex items-center gap-1 text-[var(--wa-text-2)]">
-          <button className="p-2 rounded-full hover:bg-[var(--wa-active)] hover:text-[var(--wa-text)]" title="Trending Now" onClick={() => document.getElementById('trending-toggle')?.click()}>
-            <TrendingUp size={18} />
-          </button>
-          <button className="p-2 rounded-full hover:bg-[var(--wa-active)] hover:text-[var(--wa-text)]" title="Personal noise filters" onClick={() => setFilterOpen(true)}>
-            <SlidersHorizontal size={18} />
-          </button>
-        </div>
       </header>
 
-      {/* feature strip — scrollable on mobile */}
-      <div className="shrink-0 bg-[var(--wa-panel)] border-b border-[var(--wa-border)] px-3 py-1.5 flex gap-2 overflow-x-auto wa-scroll text-[11px] sm:text-[11.5px]">
-        <FeatureChip icon={<Sparkles size={11} />} label={meta?.challenge.text ?? 'Daily Challenge…'} tone="amber" />
-        <FeatureChip icon={<Flame size={11} />} label={`Milestone ${meta?.nextMilestone.progress ?? 0}% → ${meta?.nextMilestone.target ?? '—'}`} tone="green" />
-        <FeatureChip icon={<Activity size={11} />} label={`${meta?.totals.messages ?? 0} msgs all-time`} tone="sky" />
-      </div>
+
 
       {/* messages */}
       <div className="flex-1 overflow-y-auto wa-scroll py-3">
-        <div className="px-[6%] mb-3" id="trending-wrap">
-          <TrendingBanner items={meta?.trending ?? []} onJump={(id) => document.getElementById(`gm-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })} />
-        </div>
-
         {messages.length === 0 && (
           <div className="h-[70%] flex flex-col items-center justify-center text-center text-[var(--wa-text-2)] gap-2 px-10">
             <span className="text-5xl mb-2">🌍</span>
@@ -398,25 +363,6 @@ export default function GlobalChat() {
         </div>
       </div>
 
-      {/* noise filter modal */}
-      <Modal open={filterOpen} onClose={() => setFilterOpen(false)} title="Personal noise filter">
-        <div className="space-y-5">
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-sm text-[var(--wa-text)]">Filter level</span>
-              <span className="text-xs text-[var(--wa-green-hover)] font-semibold">{['Off', 'Light', 'Medium', 'Strict'][noiseLevel]}</span>
-            </div>
-            <input type="range" min={0} max={3} value={noiseLevel} onChange={(e) => setNoiseLevel(Number(e.target.value))} className="w-full accent-emerald-400" />
-            <p className="text-xs text-[var(--wa-text-2)] mt-2">Higher levels surface messages with more reactions and questions.</p>
-          </div>
-          <div className="flex items-center justify-between">
-            <span className="text-sm text-[var(--wa-text)]">Show Question Mode messages</span>
-            <Toggle on={!hideQuestions} onChange={(v) => setHideQuestions(!v)} />
-          </div>
-          <p className="text-xs text-[var(--wa-text-2)]">Filters apply to your view only — nothing is deleted for others.</p>
-        </div>
-      </Modal>
-
       <UserProfileModal userId={profileId} onClose={() => setProfileId(null)} />
     </div>
   );
@@ -505,40 +451,4 @@ function GlobalMessageRow({
   );
 }
 
-function TrendingBanner({ items, onJump }: { items: GlobalMeta['trending']; onJump: (id: string) => void }) {
-  const [open, setOpen] = useState(false);
-  if (items.length === 0) return null;
-  return (
-    <div id="trending-toggle" className="mb-1">
-      <button
-        className="text-[12px] flex items-center gap-1.5 text-amber-300/90 hover:text-amber-200 transition"
-        onClick={() => setOpen((o) => !o)}
-      >
-        <TrendingUp size={13} /> Trending Now ({items.length}) {open ? '▲' : '▼'}
-      </button>
-      {open && (
-        <div className="mt-2 space-y-1.5 bg-[var(--wa-panel-2)] border border-[var(--wa-border)] rounded-xl p-3">
-          {items.map((t, i) => (
-            <button key={t.id} className="block w-full text-left text-[12.5px] text-[var(--wa-text)] hover:text-amber-200 truncate" onClick={() => onJump(t.id)}>
-              <span className="text-amber-400 font-bold mr-1.5">#{i + 1}</span>
-              {t.text} <span className="text-[var(--wa-text-2)]">· {t.score} pts</span>
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
 
-function FeatureChip({ icon, label, tone }: { icon: React.ReactNode; label: string; tone: 'amber' | 'green' | 'sky' }) {
-  const tones: Record<string, string> = {
-    amber: 'bg-amber-500/10 text-amber-300 border-amber-500/20',
-    green: 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20',
-    sky: 'bg-sky-500/10 text-sky-300 border-sky-500/20',
-  };
-  return (
-    <span className={`shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border ${tones[tone]}`}>
-      {icon} {label}
-    </span>
-  );
-}

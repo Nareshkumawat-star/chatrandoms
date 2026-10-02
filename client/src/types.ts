@@ -50,7 +50,16 @@ export interface ChatMessage {
   senderId: string;
   receiverId: string;
   text: string;
-  type: 'text' | 'image' | 'system';
+  type: 'text' | 'image' | 'voice' | 'system';
+  // Optional so messages written before attachments existed still type-check.
+  attachments?: {
+    kind: 'image' | 'audio';
+    url: string;
+    publicId?: string;
+    name?: string;
+    durationMs?: number;
+    mime?: string;
+  }[];
   replyTo: string | null;
   reactions: { userId: string; emoji: string; at: string }[];
   isEdited: boolean;
@@ -74,6 +83,7 @@ export interface GlobalMessage {
   reactors: { userId: string; emoji: string }[];
   replyToId: string | null;
   replySnapshot: { id: string; username: string; text: string } | null;
+  mentions?: { userId: string; username: string }[];
   expiresAt: string | null;
   isEdited: boolean;
   isDeleted: boolean;

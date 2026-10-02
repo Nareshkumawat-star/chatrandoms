@@ -1,13 +1,22 @@
 import mongoose, { Schema } from 'mongoose';
 
-export type Attachment = { kind: 'image'; url: string; publicId?: string; name?: string };
+export type AttachmentKind = 'image' | 'audio';
+
+export type Attachment = {
+  kind: AttachmentKind;
+  url: string;
+  publicId?: string;
+  name?: string;
+  durationMs?: number;
+  mime?: string;
+};
 
 export interface MessageDoc extends mongoose.Document {
   conversationId: mongoose.Types.ObjectId;
   senderId: mongoose.Types.ObjectId;
   receiverId: mongoose.Types.ObjectId;
   text: string;
-  type: 'text' | 'image' | 'system';
+  type: 'text' | 'image' | 'voice' | 'system';
   attachments: Attachment[];
   replyTo: mongoose.Types.ObjectId | null;
   reactions: { userId: mongoose.Types.ObjectId; emoji: string; at: Date }[];
@@ -26,13 +35,15 @@ const MessageSchema = new Schema<MessageDoc>(
     senderId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
     receiverId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
     text: { type: String, default: '', maxlength: 4000 },
-    type: { type: String, enum: ['text', 'image', 'system'], default: 'text' },
+    type: { type: String, enum: ['text', 'image', 'voice', 'system'], default: 'text' },
     attachments: [
       {
-        kind: { type: String, enum: ['image'] },
+        kind: { type: String, enum: ['image', 'audio'] },
         url: String,
         publicId: String,
         name: String,
+        durationMs: Number,
+        mime: String,
       },
     ],
     replyTo: { type: Schema.Types.ObjectId, ref: 'Message', default: null },

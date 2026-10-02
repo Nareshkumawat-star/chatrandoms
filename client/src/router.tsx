@@ -21,7 +21,7 @@ function FullScreenLoader() {
 function RequireAuth() {
   const me = useAuth((s) => s.me);
   if (!me) return <Navigate to="/auth" replace />;
-  return <Outlet />;
+  return <AppLayout />;
 }
 
 export const router = createBrowserRouter([

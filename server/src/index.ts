@@ -25,6 +25,8 @@ const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: { origin: config.origins, credentials: true },
   path: '/socket.io',
+  // Match express.json's 1.5mb limit so photo attachments can ride dm:send.
+  maxHttpBufferSize: 1.5 * 1024 * 1024,
 });
 
 async function main() {

@@ -9,6 +9,11 @@ export function initPresence(server: Server) {
   io = server;
 }
 
+/** Handle for REST routes that need to emit socket events (e.g. mentions). */
+export function getIo(): Server | null {
+  return io;
+}
+
 export function addPresence(userId: string, socketId: string): boolean {
   let set = online.get(userId);
   const wasOnline = Boolean(set && set.size > 0);

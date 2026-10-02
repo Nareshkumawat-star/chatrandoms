@@ -13,6 +13,9 @@ interface Props {
   /** Only meaningful when signed in. */
   onLogout?: () => void;
   totalUnread?: number;
+  /** Unread @mentions in Global Chat. */
+  globalMentions?: number;
+  onNavigate?: () => void;
 }
 
 /**
@@ -20,7 +23,7 @@ interface Props {
  * — the public landing page renders without it. Always displays the full
  * labels — Global, One-to-One, Settings and Log out — at every screen size.
  */
-export default function AppSidebar({ onLogout, totalUnread = 0 }: Props) {
+export default function AppSidebar({ onLogout, totalUnread = 0, globalMentions = 0, onNavigate }: Props) {
   const navigate = useNavigate();
   const me = useAuth((s) => s.me);
   const section = useUi((s) => s.section);
@@ -31,15 +34,18 @@ export default function AppSidebar({ onLogout, totalUnread = 0 }: Props) {
   const target = (path: string) => (signedIn ? path : '/auth');
   const pick = (s: 'global' | 'chats' | 'settings') => () => {
     if (signedIn) setSection(s);
+    if (onNavigate) onNavigate();
   };
 
   const go = (s: 'global' | 'chats' | 'settings', path: string) => {
     setSection(s);
+    if (onNavigate) onNavigate();
     navigate(target(path));
   };
 
   /** Falls back to a local logout so the rail works outside the app shell too. */
   const signOut = async () => {
+    if (onNavigate) onNavigate();
     if (onLogout) {
       onLogout();
       return;
@@ -55,11 +61,11 @@ export default function AppSidebar({ onLogout, totalUnread = 0 }: Props) {
   };
 
   return (
-    <aside className="flex w-[212px] md:w-[250px] shrink-0 flex-col wa-glass-panel border-r border-[var(--wa-border)] relative z-20">
+    <aside className="flex h-full w-[220px] lg:w-[250px] shrink-0 flex-col wa-glass-panel border-r border-[var(--wa-border)] relative z-20">
       {/* brand */}
       <div className="h-[60px] shrink-0 flex items-center px-4">
         <button
-          className="flex items-center gap-2.5 min-w-0"
+          className="flex items-center gap-2.5 min-w-0 text-left cursor-pointer"
           onClick={() => (signedIn ? go('global', '/app/global') : navigate('/auth'))}
           title="PulseChat"
         >
@@ -86,6 +92,7 @@ export default function AppSidebar({ onLogout, totalUnread = 0 }: Props) {
           onSelect={pick('global')}
           active={signedIn && section === 'global'}
           tone="sky"
+          badge={signedIn ? globalMentions : 0}
         />
         <SideNavLink
           icon={MessageCircle}
@@ -135,27 +142,49 @@ export default function AppSidebar({ onLogout, totalUnread = 0 }: Props) {
 
             {/* guests get an upgrade path to a full account */}
             {me.isGuest && (
-              <Button size="lg" className="w-full gap-2" onClick={() => navigate('/auth')}>
-                <UserPlus /> Create account
+              <Button
+                size="lg"
+                className="w-full gap-2 cursor-pointer"
+                onClick={() => {
+                  if (onNavigate) onNavigate();
+                  navigate('/auth');
+                }}
+              >
+                <UserPlus size={16} /> Create account
               </Button>
             )}
 
             <Button
               variant="outline"
               size="lg"
-              className="w-full justify-start gap-2 text-rose-300 hover:text-rose-200 hover:border-rose-400/40"
+              className="w-full justify-start gap-2 text-rose-300 hover:text-rose-200 hover:border-rose-400/40 hover:bg-rose-950/30 cursor-pointer"
               onClick={signOut}
             >
-              <LogOut /> Log out
+              <LogOut size={16} /> Log out
             </Button>
           </>
         ) : (
           <>
-            <Button size="lg" className="w-full gap-2" onClick={() => navigate('/auth')}>
-              <LogIn /> Log in
+            <Button
+              size="lg"
+              className="w-full gap-2 cursor-pointer"
+              onClick={() => {
+                if (onNavigate) onNavigate();
+                navigate('/auth');
+              }}
+            >
+              <LogIn size={16} /> Log in
             </Button>
-            <Button variant="outline" size="lg" className="w-full gap-2" onClick={() => navigate('/auth')}>
-              <UserPlus /> Create account
+            <Button
+              variant="outline"
+              size="lg"
+              className="w-full gap-2 cursor-pointer"
+              onClick={() => {
+                if (onNavigate) onNavigate();
+                navigate('/auth');
+              }}
+            >
+              <UserPlus size={16} /> Create account
             </Button>
           </>
         )}

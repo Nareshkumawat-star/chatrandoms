@@ -2,6 +2,7 @@ import type { Server, Socket } from 'socket.io';
 import { GlobalMessage } from '../models/GlobalMessage.js';
 import { User } from '../models/User.js';
 import { sanitizeText } from '../utils/text.js';
+import { resolveMentions } from '../utils/mentions.js';
 import { hit, penalize } from '../lib/rateLimiter.js';
 import { config } from '../config/env.js';
 import { logger } from '../lib/logger.js';
@@ -63,6 +64,8 @@ export function registerGlobalHandlers(io: Server, socket: Socket) {
 
       const anonymous = Boolean(body.anonymous) && user.anonymousMode;
 
+      const mentions = await resolveMentions(text, ctx.userId);
+
       const doc = await GlobalMessage.create({
         senderId: user._id,
         senderUsername: user.username,
@@ -73,6 +76,7 @@ export function registerGlobalHandlers(io: Server, socket: Socket) {
         kind,
         replyToId: body.replyToId && replySnapshot ? body.replyToId : null,
         replySnapshot,
+        mentions,
         expiresAt,
       });
 
@@ -84,6 +88,17 @@ export function registerGlobalHandlers(io: Server, socket: Socket) {
       nsp.emit('global:message', payload);
       // milestone/trending bookkeeping is periodic; emit pulse tick
       nsp.emit('global:pulse', { at: Date.now() });
+
+      // Targeted @mention ping — only the mentioned users' personal rooms.
+      for (const mt of mentions) {
+        nsp.to(`user:${mt.userId}`).emit('global:mention', {
+          messageId: String(doc._id),
+          text: text.slice(0, 200),
+          from: anonymous
+            ? null
+            : { id: ctx.userId, username: ctx.username, displayName: user.displayName, avatar: user.avatar },
+        });
+      }
       ack?.({ message: payload });
     } catch (err) {
       logger.error('global:send failed', err);
@@ -170,7 +185,12 @@ export function registerGlobalHandlers(io: Server, socket: Socket) {
       if (!msg) return ack?.({ error: 'Message not found' });
       if (String(msg.senderId) !== ctx.userId) return ack?.({ error: 'You can only edit your own messages' });
 
+      // Re-resolve mentions on edit; only newly added people get pinged.
+      const previous = (msg.mentions ?? []).map((x) => String(x.userId));
+      const mentions = await resolveMentions(text, ctx.userId);
+
       msg.text = text;
+      msg.mentions = mentions.map((m) => ({ userId: m.userId as never, username: m.username }));
       msg.isEdited = true;
       msg.editedAt = new Date();
       await msg.save();
@@ -178,9 +198,24 @@ export function registerGlobalHandlers(io: Server, socket: Socket) {
       nsp.emit('global:messageUpdated', {
         messageId: String(msg._id),
         text: msg.text,
+        mentions: msg.mentions.map((x) => ({ userId: String(x.userId), username: x.username })),
         isEdited: true,
         editedAt: msg.editedAt,
       });
+
+      const added = mentions.filter((mt) => !previous.includes(mt.userId));
+      if (added.length) {
+        const sender = await User.findById(ctx.userId, 'username displayName avatar');
+        for (const mt of added) {
+          nsp.to(`user:${mt.userId}`).emit('global:mention', {
+            messageId: String(msg._id),
+            text: text.slice(0, 200),
+            from: sender
+              ? { id: ctx.userId, username: sender.username, displayName: sender.displayName, avatar: sender.avatar }
+              : { id: ctx.userId, username: ctx.username, displayName: ctx.username, avatar: '' },
+          });
+        }
+      }
       ack?.({ ok: true });
     } catch (err) {
       logger.error('global:edit failed', err);
