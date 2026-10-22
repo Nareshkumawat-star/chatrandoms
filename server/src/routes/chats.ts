@@ -8,8 +8,9 @@ import { requireAuth } from '../middleware/auth.js';
 import { validate, asyncHandler } from '../middleware/validate.js';
 import { ApiError } from '../middleware/errors.js';
 import { sanitizeText } from '../utils/text.js';
+import { resolveMentions } from '../utils/mentions.js';
 import { hit } from '../lib/rateLimiter.js';
-import { isOnline } from '../services/presence.js';
+import { getIo, isOnline } from '../services/presence.js';
 import type { Request, Response } from 'express';
 
 const router = Router();
@@ -231,7 +232,7 @@ router.post(
 
     // Block checks both directions
     const [me, other] = await Promise.all([
-      User.findById(req.userId, 'blockedUserIds'),
+      User.findById(req.userId, 'blockedUserIds username'),
       User.findById(receiverId, 'blockedUserIds'),
     ]);
     if (me?.blockedUserIds.some((b) => String(b) === receiverId)) {
@@ -242,17 +243,36 @@ router.post(
     }
 
     const text = sanitizeText(String(req.body.text), 4000);
+    // Resolve @handles for highlighting; ping only fellow participants below.
+    const mentions = await resolveMentions(text, req.userId!);
     const doc = await Message.create({
       conversationId: conv._id,
       senderId: req.userId,
       receiverId,
       text,
       replyTo: (req.body.replyTo as string) || null,
+      mentions,
     });
 
     conv.lastMessage = { text, senderId: doc.senderId, at: doc.createdAt };
     conv.lastMessageAt = doc.createdAt;
     await conv.save();
+
+    // Targeted @mention ping over the dm namespace's personal rooms.
+    // Only participants — a private chat must never leak to outsiders.
+    const dmNsp = getIo()?.of('/dm');
+    const participantIds = conv.participants.map(String);
+    if (dmNsp) {
+      for (const mt of mentions) {
+        if (!participantIds.includes(mt.userId)) continue;
+        dmNsp.to(`user:${mt.userId}`).emit('dm:mention', {
+          conversationId: String(conv._id),
+          messageId: String(doc._id),
+          text: text.slice(0, 200),
+          from: { id: req.userId, username: me?.username },
+        });
+      }
+    }
 
     res.status(201).json({ message: doc });
   })

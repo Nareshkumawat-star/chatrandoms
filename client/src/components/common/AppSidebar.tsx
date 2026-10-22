@@ -2,7 +2,7 @@ import { useNavigate } from 'react-router';
 import type { LucideIcon } from 'lucide-react';
 import { Globe, MessageCircle, Settings as SettingsIcon, LogOut, LogIn, UserPlus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Link000, Link001, Link005 } from '@/components/ui/skiper-ui/skiper40';
+import { Link000 } from '@/components/ui/skiper-ui/skiper40';
 import Avatar from './Avatar';
 import { api } from '../../lib/api';
 import { getDmSocket, getGlobalSocket } from '../../lib/socket';
@@ -50,14 +50,8 @@ export default function AppSidebar({ onLogout, totalUnread = 0, globalMentions =
       onLogout();
       return;
     }
-    try {
-      await api.post('/auth/logout');
-    } finally {
-      getGlobalSocket()?.disconnect();
-      getDmSocket()?.disconnect();
-      useAuth.getState().setMe(null);
-      navigate('/auth');
-    }
+    await useAuth.getState().logout();
+    navigate('/auth');
   };
 
   return (
@@ -147,7 +141,7 @@ export default function AppSidebar({ onLogout, totalUnread = 0, globalMentions =
                 className="w-full gap-2 cursor-pointer"
                 onClick={() => {
                   if (onNavigate) onNavigate();
-                  navigate('/auth');
+                  navigate('/auth?mode=register');
                 }}
               >
                 <UserPlus size={16} /> Create account
@@ -189,15 +183,6 @@ export default function AppSidebar({ onLogout, totalUnread = 0, globalMentions =
           </>
         )}
 
-        {/* Skiper UI animated links (external) */}
-        <div className="flex items-center justify-between px-1 pt-0.5 text-[10.5px] text-[var(--wa-text-2)]">
-          <Link001 href="mailto:hi@skiper-ui.com" className="hover:text-[var(--wa-green-hover)]">
-            Skiper UI
-          </Link001>
-          <Link005 href="https://skiper-ui.com" className="hover:text-[var(--wa-green-hover)]">
-            Docs
-          </Link005>
-        </div>
       </div>
     </aside>
   );

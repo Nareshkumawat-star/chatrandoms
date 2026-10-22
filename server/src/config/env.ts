@@ -18,7 +18,7 @@ export const config = {
   jwt: {
     accessSecret: process.env.JWT_ACCESS_SECRET ?? 'dev-access-secret',
     refreshSecret: process.env.JWT_REFRESH_SECRET ?? 'dev-refresh-secret',
-    accessTtl: process.env.ACCESS_TOKEN_TTL ?? '15m',
+    accessTtl: process.env.ACCESS_TOKEN_TTL ?? '7d',
     refreshTtl: process.env.REFRESH_TOKEN_TTL ?? '30d',
     cookieName: process.env.COOKIE_NAME ?? 'accessToken',
   },

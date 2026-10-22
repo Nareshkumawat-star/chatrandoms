@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Search, MessageCircle, Lock, ArrowLeft, ShieldBan, VolumeX, X, UserSearch, ChevronLeft, Send, Smile, MoreVertical, Check, Plus, ShieldOff, Pencil, Trash2, Flag, Paperclip, Mic, Square, Play, Pause,
@@ -108,6 +109,7 @@ function messagePreview(m: ChatMessage): string {
 
 export default function Chats() {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const { me } = useAuth();
   const dm = getDmSocket();
 
@@ -225,6 +227,7 @@ export default function Chats() {
         setActiveConv(null);
         return;
       }
+      useUi.getState().clearDmMentions(conv.id); // viewing the chat clears its @mention badge
       const summary =
         ('other' in conv && conv.other ? (conv as ConversationSummary) : null) ??
         chatsQuery.data?.items.find((c) => c.id === conv.id) ??
@@ -294,7 +297,9 @@ export default function Chats() {
     };
     const onStop = () => setOtherTyping(false);
     const onEdit = (m: ChatMessage) => {
-      setMessages((prev) => prev.map((x) => (x._id === m._id ? { ...x, text: m.text, isEdited: true } : x)));
+      setMessages((prev) =>
+        prev.map((x) => (x._id === m._id ? { ...x, text: m.text, mentions: m.mentions, isEdited: true } : x))
+      );
     };
     const onDelete = (p: { messageId: string }) => {
       setMessages((prev) => prev.map((x) => (x._id === p.messageId ? { ...x, isDeleted: true, text: '' } : x)));
@@ -667,22 +672,28 @@ export default function Chats() {
                       <div className="text-[12.5px] text-[var(--wa-text-2)] truncate">@{u.username}</div>
                     </div>
                     <button
-                      className="px-3.5 h-9 rounded-full bg-[var(--wa-green)] text-[#0b141a] text-[13px] font-semibold hover:bg-[var(--wa-green-hover)] transition disabled:opacity-40"
+                      className="px-3.5 h-9 rounded-full bg-[var(--wa-green)] text-[#0b141a] text-[13px] font-semibold hover:bg-[var(--wa-green-hover)] transition disabled:opacity-40 cursor-pointer"
                       disabled={u.isGuest}
-                      onClick={() =>
+                      onClick={() => {
+                        if (me?.isGuest) {
+                          navigate('/auth?mode=register');
+                          return;
+                        }
                         startChat.mutate(u.username, {
                           onSuccess: () => setNewChatOpen(false),
-                        })
-                      }
+                        });
+                      }}
                     >
-                      Start Chat
+                      {me?.isGuest ? 'Sign up to chat' : 'Start Chat'}
                     </button>
                   </div>
                 </div>
               )
             )}
-            {me?.isGuest && debounced && (
-              <p className="text-[12px] text-amber-400/90 mt-2 px-3">Create an account to start private chats.</p>
+            {me?.isGuest && (
+              <p className="text-[12px] text-amber-400/90 mt-2 px-3">
+                You are browsing as a guest. Create an account to start private 1-to-1 chats.
+              </p>
             )}
           </div>
         </div>
@@ -740,10 +751,25 @@ export default function Chats() {
         {chatsQuery.isLoading ? (
           <div className="p-2"><Spinner size={20} /></div>
         ) : convItems.length === 0 ? (
-          <div className="text-center text-[13px] text-[var(--wa-text-2)] px-8 py-12 leading-relaxed">
-            <MessageCircle size={28} className="mx-auto mb-3 opacity-40" />
-            No conversations yet.<br />Search a username above to begin.
-          </div>
+          me?.isGuest ? (
+            <div className="text-center text-[13px] text-[var(--wa-text-2)] px-6 py-12 leading-relaxed">
+              <Lock size={28} className="mx-auto mb-3 text-teal-400 opacity-80" />
+              <p className="font-medium text-[var(--wa-text)] mb-1">Private Chats</p>
+              <p className="text-[12px] mb-4">You are browsing as a guest. Create an account to unlock private 1-to-1 conversations.</p>
+              <button
+                type="button"
+                onClick={() => navigate('/auth?mode=register')}
+                className="px-4 py-2 rounded-full bg-[var(--wa-green)] text-[#0b141a] font-semibold text-[13px] hover:bg-[var(--wa-green-hover)] transition cursor-pointer"
+              >
+                Create account
+              </button>
+            </div>
+          ) : (
+            <div className="text-center text-[13px] text-[var(--wa-text-2)] px-8 py-12 leading-relaxed">
+              <MessageCircle size={28} className="mx-auto mb-3 opacity-40" />
+              No conversations yet.<br />Search a username above to begin.
+            </div>
+          )
         ) : (
           convItems.map((c) => (
             <div
@@ -988,7 +1014,7 @@ export default function Chats() {
                         )}
                       </div>
                     )}
-                    <span>{m.isDeleted ? <i className="opacity-60">🚫 This message was deleted</i> : m.text}</span>
+                    <span>{m.isDeleted ? <i className="opacity-60">🚫 This message was deleted</i> : renderMentions(m.text, m.mentions, setProfileId)}</span>
                     {m.isEdited && !m.isDeleted && <span className="text-[11px] opacity-50 ml-1">edited</span>}
                     <span className="wa-meta">
                       {new Date(m.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -1394,4 +1420,28 @@ function timeAgo(date: string): string {
   if (s < 3600) return `${Math.floor(s / 60)}m`;
   if (s < 86400) return `${Math.floor(s / 3600)}h`;
   return `${Math.floor(s / 86400)}d`;
+}
+
+/** Highlight @handles that resolve to real users; click opens their profile. */
+function renderMentions(
+  text: string,
+  mentions: ChatMessage['mentions'],
+  onMention: (userId: string) => void
+) {
+  const byHandle = new Map((mentions ?? []).map((x) => [x.username.toLowerCase(), x.userId]));
+  return text.split(/(@[A-Za-z0-9_.]{2,30})/g).map((part, i) => {
+    const handle = part.startsWith('@') ? part.slice(1).toLowerCase() : '';
+    const uid = handle ? byHandle.get(handle) : undefined;
+    if (!uid) return <span key={i}>{part}</span>;
+    return (
+      <button
+        key={i}
+        className="mention cursor-pointer"
+        title={`View @${handle}`}
+        onClick={() => onMention(uid)}
+      >
+        {part}
+      </button>
+    );
+  });
 }

@@ -48,11 +48,8 @@ export default function Settings() {
   });
 
   const logout = async () => {
-    try {
-      await api.post('/auth/logout');
-    } finally {
-      window.location.href = '/auth';
-    }
+    await useAuth.getState().logout();
+    window.location.href = '/auth';
   };
 
   if (!me) return null;

@@ -3,6 +3,7 @@ import { Message, type Attachment, type MessageDoc } from '../models/Message.js'
 import { Conversation, makeDirectKey } from '../models/Conversation.js';
 import { User } from '../models/User.js';
 import { sanitizeText } from '../utils/text.js';
+import { resolveMentions } from '../utils/mentions.js';
 import { hit } from '../lib/rateLimiter.js';
 import { deleteAsset, uploadAudio, uploadPhoto } from '../lib/cloudinary.js';
 import { config } from '../config/env.js';
@@ -33,6 +34,10 @@ function messagePayload(doc: MessageDoc) {
     senderId: String(base.senderId),
     receiverId: String(base.receiverId),
     replyTo: base.replyTo ? String(base.replyTo) : null,
+    mentions: (base.mentions ?? []).map((m: { userId: unknown; username: string }) => ({
+      userId: String(m.userId),
+      username: m.username,
+    })),
   };
 }
 
@@ -140,6 +145,12 @@ export function registerDmHandlers(io: Server, socket: Socket) {
         ];
       }
 
+      // Resolve @handles for highlighting. Privacy: a ping is only emitted to
+      // mentioned users who are PARTICIPANTS of this conversation — a private
+      // chat's text must never leak into a third party's notification.
+      const mentions = await resolveMentions(text, ctx.userId);
+      const participantIds = new Set(conv.participants.map(String));
+
       const doc = await Message.create({
         conversationId: conv._id,
         senderId: ctx.userId,
@@ -148,6 +159,7 @@ export function registerDmHandlers(io: Server, socket: Socket) {
         type: attachments.length ? (rawVoice ? 'voice' : 'image') : 'text',
         attachments,
         replyTo,
+        mentions,
       });
 
       const payload = messagePayload(doc);
@@ -167,6 +179,17 @@ export function registerDmHandlers(io: Server, socket: Socket) {
       nsp.to(`user:${String(receiverId)}`).emit('dm:unread-tick', {
         conversationId: String(conv._id),
       });
+
+      // Targeted @mention ping — recipients only, never the sender.
+      for (const mt of mentions) {
+        if (!participantIds.has(mt.userId)) continue;
+        nsp.to(`user:${mt.userId}`).emit('dm:mention', {
+          conversationId: String(conv._id),
+          messageId: String(doc._id),
+          text: text.slice(0, 200),
+          from: { id: ctx.userId, username: socket.data.payload.username },
+        });
+      }
 
       ack?.({ message: payload });
     } catch (err) {
@@ -245,7 +268,10 @@ export function registerDmHandlers(io: Server, socket: Socket) {
       const conv = await loadAuthorizedConversation(ctx.userId, String(msg.conversationId));
       if (!conv) return ack?.({ error: 'Conversation not found' });
 
+      const previous = (msg.mentions ?? []).map((m) => String(m.userId));
+      const mentions = await resolveMentions(text, ctx.userId);
       msg.text = text;
+      msg.mentions = mentions.map((m) => ({ userId: m.userId as never, username: m.username }));
       msg.isEdited = true;
       msg.editedAt = new Date();
       await msg.save();
@@ -258,6 +284,18 @@ export function registerDmHandlers(io: Server, socket: Socket) {
       const payload = messagePayload(msg);
       for (const p of conv.participants) {
         nsp.to(`user:${String(p)}`).emit('dm:edit', payload);
+      }
+
+      // Ping only NEWLY added participant mentions on edit (no spam on re-edit).
+      const participantIds = new Set(conv.participants.map(String));
+      for (const mt of mentions) {
+        if (!participantIds.has(mt.userId) || previous.includes(mt.userId)) continue;
+        nsp.to(`user:${mt.userId}`).emit('dm:mention', {
+          conversationId: String(conv._id),
+          messageId: String(msg._id),
+          text: text.slice(0, 200),
+          from: { id: ctx.userId, username: socket.data.payload.username },
+        });
       }
       ack?.({ ok: true });
     } catch (err) {

@@ -19,6 +19,7 @@ export interface MessageDoc extends mongoose.Document {
   type: 'text' | 'image' | 'voice' | 'system';
   attachments: Attachment[];
   replyTo: mongoose.Types.ObjectId | null;
+  mentions: { userId: mongoose.Types.ObjectId; username: string }[];
   reactions: { userId: mongoose.Types.ObjectId; emoji: string; at: Date }[];
   isEdited: boolean;
   editedAt: Date | null;
@@ -47,6 +48,12 @@ const MessageSchema = new Schema<MessageDoc>(
       },
     ],
     replyTo: { type: Schema.Types.ObjectId, ref: 'Message', default: null },
+    mentions: [
+      {
+        userId: { type: Schema.Types.ObjectId, ref: 'User' },
+        username: String,
+      },
+    ],
     reactions: [
       {
         userId: { type: Schema.Types.ObjectId, ref: 'User' },
@@ -64,6 +71,7 @@ const MessageSchema = new Schema<MessageDoc>(
 );
 
 MessageSchema.index({ conversationId: 1, createdAt: -1 });
+MessageSchema.index({ 'mentions.userId': 1 });
 MessageSchema.index({ receiverId: 1, readAt: 1 });
 
 export const Message = mongoose.model<MessageDoc>('Message', MessageSchema);

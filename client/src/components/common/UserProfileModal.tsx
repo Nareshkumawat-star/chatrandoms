@@ -117,9 +117,16 @@ export default function UserProfileModal({ userId, onClose }: Props) {
               <GlowButton
                 variant="primary"
                 disabled={user.isGuest || rel?.blockedMe || rel?.iBlocked}
-                onClick={() => startChat.mutate(user.username)}
+                onClick={() => {
+                  if (me?.isGuest) {
+                    onClose();
+                    navigate('/auth?mode=register');
+                    return;
+                  }
+                  startChat.mutate(user.username);
+                }}
               >
-                <MessageCircle size={16} /> Message
+                <MessageCircle size={16} /> {me?.isGuest ? 'Sign up to message' : 'Message'}
               </GlowButton>
               <GlowButton onClick={() => toggleBlock.mutate(user.id)}>
                 <ShieldBan size={16} /> {rel?.iBlocked ? 'Unblock' : 'Block'}

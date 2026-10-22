@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, useEffect } from 'react';
 import { createBrowserRouter, Navigate, Outlet } from 'react-router';
 import { useAuth } from './store/auth';
 import { Spinner } from './components/uiverse/Spinner';
@@ -20,6 +20,19 @@ function FullScreenLoader() {
 
 function RequireAuth() {
   const me = useAuth((s) => s.me);
+  const initialized = useAuth((s) => s.initialized);
+  const initialize = useAuth((s) => s.initialize);
+
+  useEffect(() => {
+    if (!initialized) {
+      initialize();
+    }
+  }, [initialized, initialize]);
+
+  if (!initialized) {
+    return <FullScreenLoader />;
+  }
+
   if (!me) return <Navigate to="/auth" replace />;
   return <AppLayout />;
 }

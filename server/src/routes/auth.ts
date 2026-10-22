@@ -27,6 +27,10 @@ function sendAuth(res: Response, userId: string, username: string, role: 'user' 
   const accessToken = signAccessToken({ sub: userId, username, role });
   const refreshToken = signRefreshToken({ sub: userId, username, role });
   res.cookie(config.jwt.cookieName, accessToken, cookieOptions());
+  res.cookie('refreshToken', refreshToken, {
+    ...cookieOptions(),
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+  });
   return { accessToken, refreshToken, user: { id: userId, username, role } };
 }
 
@@ -58,7 +62,8 @@ function publicMe(doc: {
 router.post(
   '/guest',
   asyncHandler(async (req, res) => {
-    const rl = hit(`guest:${req.ip}`, 10, 60_000);
+    const limit = config.isProd ? 15 : 100;
+    const rl = hit(`guest:${req.ip}`, limit, 60_000);
     if (!rl.ok) throw new ApiError(429, 'Too many guest sessions. Try again shortly.');
 
     const suffix = Math.random().toString(36).slice(2, 8);
@@ -81,19 +86,22 @@ router.post(
 const registerSchema = z.object({
   username: z
     .string()
-    .regex(USERNAME_RE, 'Username must be 3-20 chars: letters, numbers, underscore')
+    .min(3, 'Username must be at least 3 characters')
+    .max(20, 'Username cannot exceed 20 characters')
+    .regex(USERNAME_RE, 'Username can only contain letters, numbers, and underscores')
     .transform((s) => s.trim()),
-  displayName: z.string().min(1).max(50).transform((s) => s.trim()),
-  email: z.string().email().transform((s) => s.toLowerCase().trim()),
-  password: z.string().min(8).max(128),
+  displayName: z.string().min(1, 'Display name is required').max(50, 'Display name cannot exceed 50 characters').transform((s) => s.trim()),
+  email: z.string().email('Please enter a valid email address').transform((s) => s.toLowerCase().trim()),
+  password: z.string().min(8, 'Password must be at least 8 characters').max(128),
 });
 
 router.post(
   '/register',
   validate(registerSchema),
   asyncHandler(async (req, res) => {
-    const rl = hit(`register:${req.ip}`, 5, 60_000);
-    if (!rl.ok) throw new ApiError(429, 'Too many attempts. Try again shortly.');
+    const limit = config.isProd ? 10 : 100;
+    const rl = hit(`register:${req.ip}`, limit, 60_000);
+    if (!rl.ok) throw new ApiError(429, 'Too many registration attempts. Please wait a moment and try again.');
 
     const { username, displayName, email, password } = req.body as z.infer<typeof registerSchema>;
 
@@ -102,9 +110,9 @@ router.post(
     });
     if (existing) {
       if (existing.usernameLower === username.toLowerCase()) {
-        throw new ApiError(409, 'That username is already taken');
+        throw new ApiError(409, 'That username is already taken. Please choose another.');
       }
-      throw new ApiError(409, 'An account with that email already exists');
+      throw new ApiError(409, 'An account with that email already exists. Try signing in instead.');
     }
 
     const passwordHash = await hashPassword(password);
@@ -123,26 +131,34 @@ router.post(
 
 // ---------- LOGIN ----------
 const loginSchema = z.object({
-  identifier: z.string().min(3).max(120), // username or email
-  password: z.string().min(1),
+  identifier: z.string().min(1, 'Please enter your username or email').max(120),
+  password: z.string().min(1, 'Please enter your password'),
 });
 
 router.post(
   '/login',
   validate(loginSchema),
   asyncHandler(async (req, res) => {
-    const rl = hit(`login:${req.ip}`, 10, 60_000);
-    if (!rl.ok) throw new ApiError(429, 'Too many attempts. Try again shortly.');
+    const limit = config.isProd ? 15 : 100;
+    const rl = hit(`login:${req.ip}`, limit, 60_000);
+    if (!rl.ok) throw new ApiError(429, 'Too many login attempts. Please wait a moment and try again.');
 
     const { identifier, password } = req.body as z.infer<typeof loginSchema>;
     const ident = identifier.toLowerCase().trim();
     const user = await User.findOne({
       $or: [{ usernameLower: ident }, { email: ident }],
     });
-    if (!user || !user.passwordHash) throw new ApiError(401, 'Invalid credentials');
+    if (!user) {
+      throw new ApiError(401, 'No account found with that username or email.');
+    }
+    if (!user.passwordHash) {
+      throw new ApiError(401, 'This is a guest account without a password. Please create an account or continue as guest.');
+    }
 
     const ok = await comparePassword(password, user.passwordHash);
-    if (!ok) throw new ApiError(401, 'Invalid credentials');
+    if (!ok) {
+      throw new ApiError(401, 'Incorrect password. Please try again.');
+    }
 
     const tokens = sendAuth(res, String(user._id), user.username, 'user');
     res.json({ ...tokens, me: publicMe(user) });
@@ -178,6 +194,7 @@ router.post(
   '/logout',
   asyncHandler(async (req, res) => {
     res.clearCookie(config.jwt.cookieName, { path: '/' });
+    res.clearCookie('refreshToken', { path: '/' });
     res.json({ ok: true });
   })
 );

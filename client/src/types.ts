@@ -61,6 +61,7 @@ export interface ChatMessage {
     mime?: string;
   }[];
   replyTo: string | null;
+  mentions?: { userId: string; username: string }[];
   reactions: { userId: string; emoji: string; at: string }[];
   isEdited: boolean;
   editedAt: string | null;

@@ -9,7 +9,7 @@ import { useAuth } from '../store/auth';
 import { useUi } from '../store/ui';
 import { getGlobalSocket, getDmSocket } from '../lib/socket';
 import { initSoundUnlock, playMessageSound, playGlobalPing, isSoundMuted, setSoundMuted } from '../lib/sound';
-import { setDmUnread, setGlobalActivity, setGlobalMentions, resetTitle } from '../lib/tabTitle';
+import { setDmUnread, setGlobalActivity, setGlobalMentions, setDmMentions, resetTitle } from '../lib/tabTitle';
 import {
   notificationsSupported, getNotificationPermission, requestNotificationPermission, showMessageNotification,
 } from '../lib/notifications';
@@ -51,11 +51,14 @@ export default function AppLayout() {
     return () => resetTitle();
   }, []);
 
-  // Bootstrap session from cookie
+  // Ensure latest profile data
   useEffect(() => {
     api.get('/auth/me')
       .then(({ data }) => setMe((data as { me: Me }).me))
-      .catch(() => navigate('/auth', { replace: true }));
+      .catch(() => {
+        // If session became invalid, let useAuth handle logout
+        useAuth.getState().logout().then(() => navigate('/auth', { replace: true }));
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -66,10 +69,19 @@ export default function AppLayout() {
     getDmSocket().connect();
 
     const dmSock = getDmSocket();
-    const onDmNew = (m: { senderId: string; conversationId: string; text: string }) => {
+    const onDmNew = (m: {
+      senderId: string;
+      conversationId: string;
+      text: string;
+      mentions?: { userId: string; username: string }[];
+    }) => {
       if (m.senderId !== me.id) {
-        playMessageSound();
+        // If this message @mentions me, the dm:mention handler below plays the
+        // stronger chime + notification — don't double up.
+        const mentionedMe = m.mentions?.some((x) => x.userId === me.id);
+        if (!mentionedMe) playMessageSound();
         qc.invalidateQueries({ queryKey: ['chats'] });
+        if (mentionedMe) return;
         const convs = qc.getQueryData<{ items: ConversationSummary[] }>(['chats']);
         const conv = convs?.items.find((c) => c.id === m.conversationId);
         showMessageNotification({
@@ -85,8 +97,32 @@ export default function AppLayout() {
       }
     };
     dmSock.on('dm:new', onDmNew);
+    // Someone typed @you in a private chat → stronger chime + desktop notification + badge.
+    const onDmMention = (p: {
+      conversationId: string;
+      messageId: string;
+      text: string;
+      from: { id: string; username?: string } | null;
+    }) => {
+      useUi.getState().addDmMention(p.conversationId);
+      playMessageSound();
+      const convs = qc.getQueryData<{ items: ConversationSummary[] }>(['chats']);
+      const conv = convs?.items.find((c) => c.id === p.conversationId);
+      showMessageNotification({
+        title: p.from?.username ? `@${p.from.username} mentioned you` : 'You were mentioned',
+        body: p.text.slice(0, 120),
+        icon: conv?.other?.avatar,
+        tag: `dm-mention-${p.conversationId}`,
+        onClick: () => {
+          navigate('/app/chats');
+          useUi.getState().requestOpenConversation(p.conversationId);
+        },
+      });
+    };
+    dmSock.on('dm:mention', onDmMention);
     return () => {
       dmSock.off('dm:new', onDmNew);
+      dmSock.off('dm:mention', onDmMention);
     };
   }, [me, qc, navigate]);
 
@@ -149,10 +185,16 @@ export default function AppLayout() {
     }
   }, [section]);
 
-  // Mention badge → browser tab title
+  // Mention badge → browser tab title (global + private mentions share "(@n)")
+  const dmMentionMap = useUi((s) => s.dmMentions);
+  const dmMentionTotal = useMemo(
+    () => Object.values(dmMentionMap).reduce((acc, n) => acc + n, 0),
+    [dmMentionMap]
+  );
   useEffect(() => {
     setGlobalMentions(mentionCount);
-  }, [mentionCount]);
+    setDmMentions(dmMentionTotal);
+  }, [mentionCount, dmMentionTotal]);
 
   const filteredItems = useMemo(() => {
     const q = listSearch.trim().toLowerCase();
@@ -198,14 +240,8 @@ export default function AppLayout() {
   };
 
   const logout = async () => {
-    try {
-      await api.post('/auth/logout');
-    } finally {
-      getGlobalSocket()?.disconnect();
-      getDmSocket()?.disconnect();
-      setMe(null);
-      navigate('/auth');
-    }
+    await useAuth.getState().logout();
+    navigate('/auth');
   };
 
   const goGlobal = () => {
@@ -444,6 +480,7 @@ function DrawerList({ filteredItems, loading, section, onNavigate, goGlobal, onl
   setListSearch: (v: string) => void;
 }) {
   const navigate = useNavigate();
+  const dmMentionMap = useUi((s) => s.dmMentions);
   return (
     <>
       <div className="px-4 pt-3 pb-1">
@@ -501,9 +538,16 @@ function DrawerList({ filteredItems, loading, section, onNavigate, goGlobal, onl
                   </div>
                   <div className="flex justify-between items-center gap-2">
                     <span className="text-[13px] text-[var(--wa-text-2)] truncate">{c.lastMessage?.text ?? 'Say hi 👋'}</span>
-                    {c.unread > 0 && (
-                      <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-[var(--wa-green)] text-[#0b141a] text-[11px] font-bold flex items-center justify-center">{c.unread}</span>
-                    )}
+                    <span className="flex items-center gap-1 shrink-0">
+                      {(dmMentionMap[c.id] ?? 0) > 0 && (
+                        <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-amber-400 text-[#0b141a] text-[11px] font-bold flex items-center justify-center">
+                          @{dmMentionMap[c.id] > 9 ? '9+' : dmMentionMap[c.id]}
+                        </span>
+                      )}
+                      {c.unread > 0 && (
+                        <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-[var(--wa-green)] text-[#0b141a] text-[11px] font-bold flex items-center justify-center">{c.unread}</span>
+                      )}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -528,6 +572,7 @@ function OnlineCountInline() {
 function ChatListItem({ conv }: { conv: ConversationSummary }) {
   const navigate = useNavigate();
   const activeId = useUi((s) => s.activeConversationId);
+  const mentions = useUi((s) => s.dmMentions[conv.id] ?? 0);
   const active = activeId === conv.id;
   return (
     <div
@@ -550,11 +595,18 @@ function ChatListItem({ conv }: { conv: ConversationSummary }) {
             <span className="text-[13px] text-[var(--wa-text-2)] truncate">
               {conv.lastMessage ? `${conv.lastMessage.mine ? 'You: ' : ''}${conv.lastMessage.text}` : 'Say hi 👋'}
             </span>
-            {conv.unread > 0 && (
-              <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-[var(--wa-green)] text-[#0b141a] text-[11px] font-bold flex items-center justify-center shrink-0">
-                {conv.unread > 99 ? '99+' : conv.unread}
-              </span>
-            )}
+            <span className="flex items-center gap-1 shrink-0">
+              {mentions > 0 && (
+                <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-amber-400 text-[#0b141a] text-[11px] font-bold flex items-center justify-center">
+                  @{mentions > 9 ? '9+' : mentions}
+                </span>
+              )}
+              {conv.unread > 0 && (
+                <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-[var(--wa-green)] text-[#0b141a] text-[11px] font-bold flex items-center justify-center">
+                  {conv.unread > 99 ? '99+' : conv.unread}
+                </span>
+              )}
+            </span>
           </div>
         </div>
       </div>
