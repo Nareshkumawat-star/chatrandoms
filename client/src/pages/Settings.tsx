@@ -14,7 +14,6 @@ export default function Settings() {
   const [displayName, setDisplayName] = useState(me?.displayName ?? '');
   const [bio, setBio] = useState(me?.bio ?? '');
   const [anonymousMode, setAnonymousMode] = useState(me?.anonymousMode ?? false);
-  const [noiseFilterLevel, setNoiseFilterLevel] = useState(me?.noiseFilterLevel ?? 0);
   const [msg, setMsg] = useState('');
   const [err, setErr] = useState('');
   const fileRef = useRef<HTMLInputElement>(null);
@@ -122,25 +121,11 @@ export default function Settings() {
                 <Toggle on={anonymousMode} onChange={setAnonymousMode} />
               </div>
 
-              <div className="flex items-center justify-between bg-[var(--wa-panel)] rounded-xl px-4 py-3 border border-[var(--wa-border)]">
-                <div>
-                  <div className="text-[14px]">Global noise filter</div>
-                  <p className="text-[12px] text-[var(--wa-text-2)] mt-0.5">
-                    Default filter level ({['Off', 'Light', 'Medium', 'Strict'][noiseFilterLevel]}).
-                  </p>
-                </div>
-                <input
-                  type="range" min={0} max={3} value={noiseFilterLevel}
-                  onChange={(e) => setNoiseFilterLevel(Number(e.target.value))}
-                  className="w-28 accent-emerald-400"
-                />
-              </div>
-
               <div className="flex items-center gap-3 pt-1">
                 <GlowButton
                   variant="primary"
                   disabled={save.isPending}
-                  onClick={() => save.mutate({ displayName, bio, anonymousMode, noiseFilterLevel })}
+                  onClick={() => save.mutate({ displayName, bio, anonymousMode })}
                 >
                   <Check size={15} /> {save.isPending ? 'Saving…' : 'Save changes'}
                 </GlowButton>

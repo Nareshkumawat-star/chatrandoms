@@ -82,7 +82,7 @@ pulse-chat/
 World Pulse indicator · live online count · Trending Now · Live Reaction Storm (floating emoji) ·
 Question Mode (auto-detected `?` messages + filter) · Daily Global Challenge (deterministic per UTC day) ·
 Global Reputation · Global Milestones progress · Expiring Messages (TTL, ⏱ composer toggle) ·
-Message Threads (reply snapshots, no rooms) · Anonymous Display Mode · Personal Noise Filter (3 levels) ·
+Message Threads (reply snapshots, no rooms) · Anonymous Display Mode ·
 Message editing/deletion · Report · Block · Mute · rate limiting & anti-spam.
 
 Private chats: pin (floats to the top) and archive (collapsible group) are per-user list state,

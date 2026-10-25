@@ -23,7 +23,7 @@ export default function UserProfileModal({ userId, onClose }: Props) {
   const [error, setError] = useState('');
   const [reported, setReported] = useState(false);
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError } = useQuery({
     queryKey: ['user', userId],
     enabled: Boolean(userId),
     queryFn: async () => {
@@ -76,12 +76,16 @@ export default function UserProfileModal({ userId, onClose }: Props) {
 
   return (
     <Modal open={Boolean(userId)} onClose={onClose} title="Profile">
-      {isLoading || !user ? (
+      {isLoading ? (
         <div className="space-y-3">
           <div className="skeleton h-16 w-full" />
           <div className="skeleton h-4 w-2/3" />
           <div className="skeleton h-4 w-1/2" />
         </div>
+      ) : isError || !user ? (
+        <p className="text-sm text-rose-400">
+          Couldn't load this profile. Close this window and try again.
+        </p>
       ) : (
         <div className="space-y-4">
           <div className="flex items-center gap-4">

@@ -103,6 +103,16 @@ async function main() {
   assert(partial.json.results.some((u: any) => u.username === 'rahulsharma'), 'partial username search');
   assert(!('email' in search.json.results[0]) && !('passwordHash' in search.json.results[0]), 'search leaks no email/password');
 
+  // ---------- public profile: by @username and by raw user id ----------
+  const byName = await a.call('GET', '/users/rahulsharma');
+  assert(byName.status === 200 && byName.json.user.username === 'rahulsharma', 'profile lookup by @username');
+  const bId = regB.json.me.id;
+  const byId = await a.call('GET', `/users/${bId}`);
+  assert(byId.status === 200 && byId.json.user.id === bId, 'profile lookup by user id (chat header click)');
+  assert(byId.json.viewerRelationship && byId.json.user.bio !== undefined, 'profile includes relationship + bio');
+  const missing = await a.call('GET', '/users/nobodyhere');
+  assert(missing.status === 404, 'unknown profile returns 404');
+
   // ---------- directKey flow ----------
   const d1 = await a.call('POST', '/chats/direct', { username: 'rahulsharma' });
   assert(d1.status === 200 && d1.json.conversation.id, 'A starts direct chat with B');

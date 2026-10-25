@@ -1,4 +1,4 @@
-/**
+ /**
  * Live realtime test against the RUNNING dev server (:4000).
  * Verifies: REST auth via cookies on sockets, /global broadcast,
  * /dm delivery only to the recipient, typing + read receipts.

@@ -11,7 +11,6 @@ export interface Me {
   isGuest: boolean;
   reputation: number;
   anonymousMode: boolean;
-  noiseFilterLevel: number;
 }
 
 export interface PublicUser {
