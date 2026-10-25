@@ -42,6 +42,10 @@ export interface ConversationSummary {
   lastMessage: { text: string; mine: boolean; at: string } | null;
   lastMessageAt: string | null;
   unread: number;
+  // Per-user list state (see PATCH /chats/:id/state).
+  pinned: boolean;
+  archived: boolean;
+  pinnedAt: string | null;
 }
 
 export interface ChatMessage {

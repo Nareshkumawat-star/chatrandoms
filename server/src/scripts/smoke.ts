@@ -144,6 +144,43 @@ async function main() {
   assert(chatsA.json.items.length === 1, 'chat list has exactly 1 conversation');
   assert(convA.unread >= 1, `unread count present (${convA.unread})`);
 
+  // ---------- pin / archive (per-user chat list state) ----------
+  const pin = await a.call('PATCH', `/chats/${convId}/state`, { pinned: true });
+  assert(pin.status === 200 && pin.json.pinned === true, 'A pins the conversation');
+
+  // second conversation so ordering can be observed
+  const dE = await a.call('POST', '/chats/direct', { username: 'eve' });
+  assert(dE.status === 200, 'A starts a second conversation');
+  const convEve = dE.json.conversation.id;
+  await a.call('POST', `/chats/${convEve}/messages`, { text: 'hi eve' });
+
+  const listA1 = await a.call('GET', '/chats');
+  assert(listA1.json.items[0].id === convId && listA1.json.items[0].pinned === true, 'pinned chat sorts above a newer chat');
+  assert(listA1.json.items.find((i: any) => i.id === convEve).pinned === false, 'second chat not pinned');
+
+  const listB1 = await b.call('GET', '/chats');
+  assert(listB1.json.items[0].pinned === false, 'pin is per-user (B sees it unpinned)');
+
+  const forbidden = await c.call('PATCH', `/chats/${convId}/state`, { pinned: true });
+  assert(forbidden.status === 403, 'outsider cannot pin someone else\'s conversation (403)');
+
+  const emptyState = await a.call('PATCH', `/chats/${convId}/state`, {});
+  assert(emptyState.status === 400, 'empty state update rejected (400)');
+
+  const arch = await a.call('PATCH', `/chats/${convId}/state`, { archived: true });
+  assert(arch.status === 200 && arch.json.archived === true && arch.json.pinned === false, 'archiving drops the pin');
+
+  const listA2 = await a.call('GET', '/chats');
+  const archRow = listA2.json.items.find((i: any) => i.id === convId);
+  assert(archRow.archived === true && archRow.pinned === false, 'archived chat listed with archived flag');
+  assert(listA2.json.items.length === 2, 'archived chats are not dropped from the list');
+
+  const listB2 = await b.call('GET', '/chats');
+  assert(listB2.json.items[0].archived === false, 'archive is per-user (B still sees the chat normally)');
+
+  const unarch = await a.call('PATCH', `/chats/${convId}/state`, { archived: false });
+  assert(unarch.status === 200 && unarch.json.archived === false, 'A unarchives the conversation');
+
   // ---------- global chat ----------
   const g1 = await a.call('POST', '/global/messages', { text: 'Hello everyone! 🌍' });
   assert(g1.status === 201, 'A posts to global chat');

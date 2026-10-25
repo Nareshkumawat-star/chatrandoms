@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { setSocketToken } from './socket';
 
 // Same-origin by default (Vite dev proxy / same domain in production).
 // Override with VITE_API_URL for a split deployment.
@@ -81,6 +82,7 @@ api.interceptors.response.use(
           localStorage.setItem('pulsechat_token', newAccessToken);
           if (newRefreshToken) localStorage.setItem('pulsechat_refresh', newRefreshToken);
           api.defaults.headers.common['Authorization'] = `Bearer ${newAccessToken}`;
+          setSocketToken(newAccessToken);
           processQueue(null, newAccessToken);
           originalRequest.headers.Authorization = `Bearer ${newAccessToken}`;
           return api(originalRequest);

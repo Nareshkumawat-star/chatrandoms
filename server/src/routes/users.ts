@@ -99,10 +99,18 @@ router.get(
   '/:username',
   requireAuth,
   asyncHandler(async (req: Request, res: Response) => {
-    const username = sanitizeText(req.params.username, 30).replace(/^@/, '');
-    const user = await User.findOne({ usernameLower: username.toLowerCase() })
-      .select('username displayName avatar bio isGuest reputation lastSeen blockedUserIds')
+    const raw = sanitizeText(req.params.username, 30).replace(/^@/, '').trim();
+    if (!raw) throw new ApiError(400, 'Invalid user');
+
+    // Callers pass either a @username or a raw user id (profile clicks from a
+    // chat only know the id), so accept both.
+    const profileFields = 'username displayName avatar bio isGuest reputation lastSeen blockedUserIds';
+    let user = await User.findOne({ usernameLower: raw.toLowerCase() })
+      .select(profileFields)
       .lean();
+    if (!user && /^[a-f\d]{24}$/i.test(raw)) {
+      user = await User.findById(raw).select(profileFields).lean();
+    }
     if (!user) throw new ApiError(404, 'User not found');
 
     const me = await User.findById(req.userId, 'blockedUserIds mutedUserIds').lean();
@@ -126,7 +134,6 @@ const updateMeSchema = z.object({
   bio: z.string().max(200).optional(),
   avatar: z.string().max(400_000).optional(), // allows data-URL fallback when Cloudinary is unset
   anonymousMode: z.boolean().optional(),
-  noiseFilterLevel: z.number().int().min(0).max(3).optional(),
 });
 
 router.patch(
@@ -141,7 +148,6 @@ router.patch(
     if (typeof body.bio === 'string') $set.bio = sanitizeText(body.bio, 200);
     if (typeof body.avatar === 'string') $set.avatar = body.avatar;
     if (typeof body.anonymousMode === 'boolean') $set.anonymousMode = body.anonymousMode;
-    if (typeof body.noiseFilterLevel === 'number') $set.noiseFilterLevel = body.noiseFilterLevel;
     if (Object.keys($set).length === 0) throw new ApiError(400, 'Nothing to update');
 
     const user = await User.findByIdAndUpdate(req.userId, { $set }, { new: true });
@@ -157,7 +163,6 @@ router.patch(
         isGuest: user.isGuest,
         reputation: user.reputation,
         anonymousMode: user.anonymousMode,
-        noiseFilterLevel: user.noiseFilterLevel,
       },
     });
   })

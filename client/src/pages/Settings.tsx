@@ -111,8 +111,8 @@ export default function Settings() {
             </div>
           ) : (
             <div className="space-y-4">
-              <NeonInput label="Display name" value={displayName} onChange={(e) => setDisplayName(e.target.value)} maxLength={50} />
-              <NeonInput label="Bio" value={bio} onChange={(e) => setBio(e.target.value)} maxLength={200} />
+              <NeonInput label="Display name" value={displayName} onChange={(e) => setDisplayName(e.target.value)} maxLength={50} placeholder="How others see you" />
+              <NeonInput label="Bio" value={bio} onChange={(e) => setBio(e.target.value)} maxLength={200} placeholder="Say something about yourself" />
 
               <div className="flex items-center justify-between bg-[var(--wa-panel)] rounded-xl px-4 py-3 border border-[var(--wa-border)]">
                 <div>

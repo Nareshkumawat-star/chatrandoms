@@ -54,6 +54,8 @@ router.get(
     const items = convs.map((c) => {
       const otherId = otherParticipant(c, req.userId!);
       const other = byId.get(otherId);
+      const pinnedAt = c.pinnedBy?.find((f) => String(f.user) === req.userId)?.at ?? null;
+      const archivedAt = c.archivedBy?.find((f) => String(f.user) === req.userId)?.at ?? null;
       return {
         id: String(c._id),
         other: other
@@ -76,10 +78,89 @@ router.get(
           : null,
         lastMessageAt: c.lastMessageAt,
         unread: unreadByConv.get(String(c._id)) ?? 0,
+        pinned: Boolean(pinnedAt),
+        archived: Boolean(archivedAt),
+        pinnedAt,
       };
     });
 
+    // Pinned chats float to the top (newest pin first), everything else keeps
+    // the lastMessageAt order. Archived chats stay in place — the client
+    // groups them separately.
+    items.sort((x, y) => {
+      if (x.pinned !== y.pinned) return x.pinned ? -1 : 1;
+      if (x.pinned && y.pinned) {
+        return new Date(y.pinnedAt as Date).getTime() - new Date(x.pinnedAt as Date).getTime();
+      }
+      return 0;
+    });
+
     res.json({ items });
+  })
+);
+
+// ---------- PIN / ARCHIVE A CONVERSATION (per user) ----------
+const stateSchema = z
+  .object({
+    pinned: z.boolean().optional(),
+    archived: z.boolean().optional(),
+  })
+  .refine((d) => d.pinned !== undefined || d.archived !== undefined, {
+    message: 'pinned or archived is required',
+  });
+
+router.patch(
+  '/:conversationId/state',
+  requireAuth,
+  validate(stateSchema),
+  asyncHandler(async (req: Request, res: Response) => {
+    const conversationId = req.params.conversationId;
+    if (!/^[a-f\d]{24}$/i.test(conversationId)) throw new ApiError(400, 'Invalid conversation id');
+
+    const conv = await Conversation.findById(conversationId).lean();
+    if (!conv) throw new ApiError(404, 'Conversation not found');
+    if (!conv.participants.some((p) => String(p) === req.userId)) {
+      throw new ApiError(403, 'You are not a participant of this conversation');
+    }
+
+    const { pinned, archived } = req.body as { pinned?: boolean; archived?: boolean };
+    const user = new mongoose.Types.ObjectId(req.userId);
+    const pull: Record<string, unknown> = {};
+    const push: Record<string, unknown> = {};
+
+    if (pinned === true) {
+      pull.pinnedBy = { user };
+      push.pinnedBy = { user, at: new Date() };
+    } else if (pinned === false) {
+      pull.pinnedBy = { user };
+    }
+
+    if (archived === true) {
+      pull.archivedBy = { user };
+      push.archivedBy = { user, at: new Date() };
+      // An archived chat leaves the pinned group — two homes would be ambiguous.
+      pull.pinnedBy = { user };
+      delete push.pinnedBy;
+    } else if (archived === false) {
+      pull.archivedBy = { user };
+    }
+
+    // Mongo rejects $pull + $push on the same path in one update, so the
+    // remove-then-add pair runs as two steps (pin re-ordering needs both).
+    if (Object.keys(pull).length) {
+      await Conversation.updateOne({ _id: conversationId }, { $pull: pull });
+    }
+    if (Object.keys(push).length) {
+      await Conversation.updateOne({ _id: conversationId }, { $push: push });
+    }
+
+    const after = Object.keys(pull).length || Object.keys(push).length
+      ? await Conversation.findById(conversationId).lean()
+      : conv;
+
+    const nowPinned = Boolean(after?.pinnedBy?.some((f) => String(f.user) === req.userId));
+    const nowArchived = Boolean(after?.archivedBy?.some((f) => String(f.user) === req.userId));
+    res.json({ id: conversationId, pinned: nowPinned, archived: nowArchived });
   })
 );
 

@@ -85,14 +85,17 @@ Global Reputation · Global Milestones progress · Expiring Messages (TTL, ⏱ c
 Message Threads (reply snapshots, no rooms) · Anonymous Display Mode · Personal Noise Filter (3 levels) ·
 Message editing/deletion · Report · Block · Mute · rate limiting & anti-spam.
 
+Private chats: pin (floats to the top) and archive (collapsible group) are per-user list state,
+stored on the conversation's `pinnedBy` / `archivedBy` arrays — archiving drops the pin.
+
 ## API
 
 ```
 POST   /api/auth/guest|register|login|logout|refresh     GET /api/auth/me
 GET    /api/users/search?q=                              GET /api/users/:username
 PATCH  /api/users/me
-POST   /api/users/:userId/block|mute|report
-GET    /api/chats                                        POST /api/chats/direct {username}
+POST   /api/users/:userId/block|mute|reportGET    /api/chats                                        POST   /api/chats/direct {username}
+PATCH  /api/chats/:conversationId/state {pinned?,archived?}
 GET    /api/chats/:conversationId/messages?before&limit  POST /api/chats/:conversationId/messages
 PATCH  /api/messages/:messageId                          DELETE /api/messages/:messageId
 POST   /api/messages/:messageId/reaction

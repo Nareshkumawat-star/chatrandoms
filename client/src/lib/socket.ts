@@ -34,6 +34,13 @@ export function getDmSocket(): Socket {
   return dmSocket;
 }
 
+// Keep live connections' handshake auth in sync after a token refresh, so
+// the next reconnect uses the current session instead of a stale one.
+export function setSocketToken(token: string) {
+  if (globalSocket) globalSocket.auth = { token };
+  if (dmSocket) dmSocket.auth = { token };
+}
+
 export function disconnectAll() {
   globalSocket?.disconnect();
   globalSocket = null;

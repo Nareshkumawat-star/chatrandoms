@@ -251,7 +251,69 @@ async function main() {
   const c = cookieJar();
   await c.call('POST', '/auth/register', { username: 'sockc', displayName: 'Sock C', email: 'c@sock.test', password: 'password123' });
   const gc = await connect(`${BASE}/global`, c.cookie);
-  assert(gc.connected, 'third socket connects');
+  const dc = await connect(`${BASE}/dm`, c.cookie);
+  assert(gc.connected && dc.connected, 'third socket connects');
+
+  // --- DM @mentions: resolved on send, ping only the OTHER participant ---
+  let outsiderDmPing = 0;
+  dc.on('dm:mention', () => { outsiderDmPing += 1; });
+  let senderDmPing = 0;
+  da.on('dm:mention', () => { senderDmPing += 1; });
+  const dmMentionPromise = waitEvent<any>(db_, 'dm:mention');
+  da.emit(
+    'dm:send',
+    { conversationId: convId, text: 'quick word @sockb and @sockc' },
+    (res: any) => {
+      if (res?.error) throw new Error('dm:send mention error: ' + res.error);
+    }
+  );
+  const dmMentionMsg = await dmMentionPromise;
+  assert(String(dmMentionMsg.conversationId) === convId, 'dm:mention ping carries the conversation');
+  const dmMsgAfter = await a.call('GET', `/chats/${convId}/messages?limit=5`);
+  const dmMentionDoc = (dmMsgAfter.json.messages ?? []).find(
+    (m: any) => String(m._id) === String(dmMentionMsg.messageId)
+  );
+  const dmMentionNames = (dmMentionDoc?.mentions ?? []).map((m: any) => m.username);
+  assert(
+    dmMentionNames.includes('sockb') && dmMentionNames.includes('sockc') && !dmMentionNames.includes('socka'),
+    'DM mentions resolve for highlighting but never the sender'
+  );
+  await new Promise((r) => setTimeout(r, 300));
+  assert(senderDmPing === 0, 'sender never receives their own dm:mention');
+  assert(outsiderDmPing === 0, 'non-participant mention gets NO dm:mention (private chat stays private)');
+
+  // --- editing a DM to ADD a mention pings the newly mentioned participant ---
+  const plainSend = await new Promise<any>((resolve) => {
+    da.emit('dm:send', { conversationId: convId, text: 'plain message for edit' }, resolve);
+  });
+  assert(!plainSend?.error, 'plain DM before mention-edit sends');
+  const editPingPromise = waitEvent<any>(db_, 'dm:mention');
+  await new Promise<void>((resolve) => {
+    da.emit('dm:edit', { messageId: plainSend.message._id, text: 'now with @sockb mention' }, (res: any) => {
+      if (res?.error) throw new Error('dm:edit mention error: ' + res.error);
+      resolve();
+    });
+  });
+  const editPing = await editPingPromise;
+  assert(String(editPing.messageId) === String(plainSend.message._id), 'editing to add a mention pings the DM participant');
+  let rePingCount = 0;
+  const countDmPing = () => { rePingCount += 1; };
+  db_.on('dm:mention', countDmPing);
+  await new Promise<void>((resolve) => {
+    da.emit('dm:edit', { messageId: plainSend.message._id, text: 'still @sockb but re-edited' }, () => resolve());
+  });
+  await new Promise((r) => setTimeout(r, 300));
+  assert(rePingCount === 0, 're-editing does NOT re-ping an already-mentioned user');
+  db_.off('dm:mention', countDmPing);
+
+  // --- REST fallback send also resolves mentions and pings ---
+  const restPingPromise = waitEvent<any>(db_, 'dm:mention');
+  const restMention = await a.call('POST', `/chats/${convId}/messages`, { text: 'REST ping @sockb' });
+  assert(restMention.status === 201, 'REST DM with mention created');
+  const restNames = (restMention.json.message.mentions ?? []).map((m: any) => m.username);
+  assert(restNames.includes('sockb'), 'REST DM resolves mentions');
+  const restPing = await restPingPromise;
+  assert(String(restPing.messageId) === String(restMention.json.message._id), 'REST DM emits dm:mention ping');
 
   // --- @mentions: resolved on send, self excluded, targeted ping delivered ---
   const mentionPromise = waitEvent<any>(gb, 'global:mention');
@@ -304,6 +366,45 @@ async function main() {
   assert((dsearchMiss.json.messages ?? []).length === 0, 'conversation search misses unknown terms');
   const dsearchBad = await b.call('GET', `/messages/search?conversationId=${'f'.repeat(24)}&q=hello`);
   assert(dsearchBad.status === 404, 'conversation search rejects unknown conversations');
+
+  // --- guest identity is frozen at handshake; re-registering requires a NEW handshake ---
+  // Repro of the real bug: user starts as guest, socket authenticates as guest,
+  // then they sign up — the UI shows their account but an already-open socket
+  // still carries role:'guest' and every send is rejected.
+  const up = cookieJar();
+  const guestRes = await up.call('POST', '/auth/guest');
+  assert(guestRes.status === 201, 'guest session created for identity test');
+  const dGuest = await connect(`${BASE}/dm`, up.cookie);
+  assert(dGuest.connected, 'guest socket connects (authenticated as role:guest)');
+  const guestSend = await new Promise<any>((resolve) => {
+    dGuest.emit('dm:send', { conversationId: convId, text: 'hi as guest' }, resolve);
+  });
+  assert(
+    guestSend?.error === 'Create an account to start private chats.',
+    'guest handshake is rejected on dm:send with the create-account error'
+  );
+
+  // Same session signs up → new cookie → the client must re-handshake (fresh
+  // connection) instead of reusing the stale guest socket.
+  const regUp = await up.call('POST', '/auth/register', {
+    username: 'sockd',
+    displayName: 'Sock D',
+    email: 'd@sock.test',
+    password: 'password123',
+  });
+  assert(regUp.status === 201 && regUp.json.me.isGuest === false, 'guest upgrades to a personal account');
+  const convUp = await up.call('POST', '/chats/direct', { username: 'sockb' });
+  assert(convUp.status === 200 || convUp.status === 201, 'upgraded account can start a private chat');
+  const dUp = await connect(`${BASE}/dm`, up.cookie);
+  const upgradedSend = await new Promise<any>((resolve) => {
+    dUp.emit('dm:send', { conversationId: convUp.json.conversation.id, text: 'hi after signup' }, resolve);
+  });
+  assert(
+    !upgradedSend?.error && Boolean(upgradedSend?.message),
+    'fresh handshake after signing up sends DMs (stale guest identity is dropped)'
+  );
+  dGuest.disconnect();
+  dUp.disconnect();
 
   console.log(results.join('\n'));
   console.log('\n✅ LIVE SOCKET TESTS PASSED');

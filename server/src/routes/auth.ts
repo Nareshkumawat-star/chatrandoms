@@ -43,7 +43,6 @@ function publicMe(doc: {
   isGuest: boolean;
   reputation: number;
   anonymousMode: boolean;
-  noiseFilterLevel: number;
 }) {
   return {
     id: String(doc._id),
@@ -54,7 +53,6 @@ function publicMe(doc: {
     isGuest: doc.isGuest,
     reputation: doc.reputation,
     anonymousMode: doc.anonymousMode,
-    noiseFilterLevel: doc.noiseFilterLevel,
   };
 }
 

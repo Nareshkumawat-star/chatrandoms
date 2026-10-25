@@ -312,7 +312,7 @@ export default function GlobalChat() {
             <input
               autoFocus
               className="bg-transparent outline-none text-[13.5px] w-full placeholder:text-[var(--wa-text-2)]"
-              placeholder="Search messages…"
+              placeholder="Search global messages"
               value={searchQ}
               onChange={(e) => setSearchQ(e.target.value)}
             />
@@ -480,7 +480,7 @@ export default function GlobalChat() {
           <input
             ref={inputRef}
             className="flex-1 min-w-0 bg-[var(--wa-panel-2)] rounded-lg px-3 sm:px-4 py-2.5 text-[14.5px] outline-none placeholder:text-[var(--wa-text-2)]"
-            placeholder={me?.isGuest ? 'Message the world…' : 'Message the whole world…'}
+            placeholder={me?.isGuest ? 'Say hi to the world…' : 'Message the whole world…'}
             value={input}
             maxLength={1000}
             onChange={(e) => onInputChange(e.target.value)}

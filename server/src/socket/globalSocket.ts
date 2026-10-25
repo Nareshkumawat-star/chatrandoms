@@ -41,8 +41,7 @@ export function registerGlobalHandlers(io: Server, socket: Socket) {
       const user = await User.findById(ctx.userId);
       if (!user) return ack?.({ error: 'Account not found' });
 
-      // blocked/muted filtering: if the author blocked the reply target, still fine;
-      // noise filtering happens on read side. Guests cannot send questions.
+      // Guests cannot send questions.
       const kind = body.kind === 'question' && ctx.role !== 'guest' ? 'question' : 'message';
 
       let replySnapshot = null;

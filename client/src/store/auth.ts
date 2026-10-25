@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { api } from '../lib/api';
-import { disconnectAll } from '../lib/socket';
+import { disconnectAll, setSocketToken } from '../lib/socket';
 import type { Me, Role } from '../types';
 
 interface AuthState {
@@ -20,6 +20,12 @@ export const useAuth = create<AuthState>((set, get) => ({
   initialized: false,
 
   setMe: (me, token, refreshToken) => {
+    // Sockets authenticate once, at handshake time. If the account changed
+    // (guest → registered, or a different user), any live connection still
+    // carries the OLD identity and the server will reject its sends — drop
+    // them so AppLayout reconnects with the fresh credentials.
+    const prev = get().me;
+    const identityChanged = Boolean(prev && me && (prev.id !== me.id || prev.isGuest !== me.isGuest));
     if (token) {
       localStorage.setItem('pulsechat_token', token);
       api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
@@ -38,6 +44,8 @@ export const useAuth = create<AuthState>((set, get) => ({
       token: token !== undefined ? token : get().token,
       initialized: true,
     });
+    if (me === null || identityChanged) disconnectAll();
+    else if (token) setSocketToken(token);
   },
 
   initialize: async () => {

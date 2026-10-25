@@ -54,16 +54,19 @@ export function initSockets(io: Server) {
 
   globalNsp.on('connection', async (socket) => {
     const payload = (socket.data as { payload: TokenPayload }).payload;
+
+    // Join + register handlers SYNCHRONOUSLY, before any await below: a fast
+    // client can emit right after connecting, and socket.io silently DROPS
+    // events that arrive before a listener exists (the ack never fires).
+    socket.join('global-chat'); // the ONE worldwide room
+    socket.join(`user:${payload.sub}`); // personal room (mentions / targeted events)
+    registerGlobalHandlers(io, socket);
+
     await attachUser(socket, payload);
     const becameOnline = addPresence(payload.sub, socket.id);
     if (becameOnline) {
       broadcastPresence(payload.sub, true, new Date());
     }
-
-    socket.join('global-chat'); // the ONE worldwide room
-    socket.join(`user:${payload.sub}`); // personal room (mentions / targeted events)
-
-    registerGlobalHandlers(io, socket);
 
     socket.on('disconnect', async () => {
       const wentOffline = removePresence(payload.sub, socket.id);
@@ -89,6 +92,13 @@ export function initSockets(io: Server) {
 
   dmNsp.on('connection', async (socket) => {
     const payload = (socket.data as { payload: TokenPayload }).payload;
+
+    // Join + register handlers SYNCHRONOUSLY, before any await below: a fast
+    // client can emit right after connecting, and socket.io silently DROPS
+    // events that arrive before a listener exists (the ack never fires).
+    socket.join(`user:${payload.sub}`); // personal delivery room
+    registerDmHandlers(io, socket);
+
     await attachUser(socket, payload);
     const becameOnline = addPresence(payload.sub, socket.id);
     if (becameOnline) {
@@ -101,10 +111,6 @@ export function initSockets(io: Server) {
         logger.warn('unread bootstrap failed', err);
       }
     }
-
-    socket.join(`user:${payload.sub}`); // personal delivery room
-
-    registerDmHandlers(io, socket);
 
     socket.on('disconnect', async () => {
       const wentOffline = removePresence(payload.sub, socket.id);

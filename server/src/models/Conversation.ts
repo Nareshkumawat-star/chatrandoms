@@ -1,9 +1,14 @@
 import mongoose, { Schema } from 'mongoose';
 
+/** Per-user chat-list state — one entry per participant at most. */
+export type UserFlag = { user: mongoose.Types.ObjectId; at: Date };
+
 export interface ConversationDoc extends mongoose.Document {
   type: 'direct';
   participants: mongoose.Types.ObjectId[];
   directKey: string;
+  pinnedBy: UserFlag[];
+  archivedBy: UserFlag[];
   lastMessage: {
     text: string;
     senderId: mongoose.Types.ObjectId;
@@ -14,11 +19,23 @@ export interface ConversationDoc extends mongoose.Document {
   updatedAt: Date;
 }
 
+const UserFlagSchema = new Schema<UserFlag>(
+  {
+    user: { type: Schema.Types.ObjectId, required: true, ref: 'User' },
+    at: { type: Date, default: () => new Date() },
+  },
+  { _id: false }
+);
+
 const ConversationSchema = new Schema<ConversationDoc>(
   {
     type: { type: String, enum: ['direct'], default: 'direct' },
     participants: { type: [Schema.Types.ObjectId], required: true, ref: 'User' },
     directKey: { type: String, required: true },
+    // Pinned / archived are per-user: the same conversation can be pinned for
+    // one participant and floating normally for the other.
+    pinnedBy: { type: [UserFlagSchema], default: [] },
+    archivedBy: { type: [UserFlagSchema], default: [] },
     lastMessage: {
       text: { type: String, default: '' },
       senderId: { type: Schema.Types.ObjectId, ref: 'User' },

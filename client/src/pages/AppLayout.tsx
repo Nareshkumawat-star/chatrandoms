@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Outlet, useNavigate } from 'react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {  MessageCircle, Settings as SettingsIcon, WifiOff, Search, Users, Globe,
-  Volume2, VolumeX, Bell, BellOff, Menu, X,
+  Volume2, VolumeX, Bell, BellOff, Menu, X, Pin,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { useAuth } from '../store/auth';
@@ -197,9 +197,12 @@ export default function AppLayout() {
   }, [mentionCount, dmMentionTotal]);
 
   const filteredItems = useMemo(() => {
+    // Archived chats live only in the Chats page's collapsed group — the
+    // sidebar list stays short.
+    const visible = items.filter((c) => !c.archived);
     const q = listSearch.trim().toLowerCase();
-    if (!q) return items;
-    return items.filter(
+    if (!q) return visible;
+    return visible.filter(
       (c) =>
         c.other?.displayName?.toLowerCase().includes(q) ||
         c.other?.username?.toLowerCase().includes(q)
@@ -397,7 +400,7 @@ export default function AppLayout() {
                 <Search size={15} className="text-[var(--wa-text-2)] shrink-0" />
                 <input
                   className="bg-transparent outline-none text-[13.5px] w-full placeholder:text-[var(--wa-text-2)]"
-                  placeholder="Search username… e.g. @nareshk"
+                  placeholder="Search chats or @username"
                   value={listSearch}
                   onChange={(e) => setListSearch(e.target.value)}
                 />
@@ -513,7 +516,7 @@ function DrawerList({ filteredItems, loading, section, onNavigate, goGlobal, onl
           <Search size={15} className="text-[var(--wa-text-2)] shrink-0" />
           <input
             className="bg-transparent outline-none text-[13.5px] w-full placeholder:text-[var(--wa-text-2)]"
-            placeholder="Search username… e.g. @nareshk"
+            placeholder="Search chats or @username"
             value={listSearch}
             onChange={(e) => setListSearch(e.target.value)}
           />
@@ -534,7 +537,10 @@ function DrawerList({ filteredItems, loading, section, onNavigate, goGlobal, onl
                 <div className="flex-1 min-w-0">
                   <div className="flex justify-between items-baseline gap-2">
                     <span className="font-medium text-[15px] truncate">{c.other?.displayName ?? 'Unknown'}</span>
-                    <span className="text-[11px] text-[var(--wa-text-2)]">{c.lastMessage?.at ? timeAgo(c.lastMessage.at) : ''}</span>
+                    <span className="flex items-center gap-1 shrink-0 text-[11px] text-[var(--wa-text-2)]">
+                      {c.pinned && <Pin size={11} className="text-[var(--wa-green-hover)]" />}
+                      {c.lastMessage?.at ? timeAgo(c.lastMessage.at) : ''}
+                    </span>
                   </div>
                   <div className="flex justify-between items-center gap-2">
                     <span className="text-[13px] text-[var(--wa-text-2)] truncate">{c.lastMessage?.text ?? 'Say hi 👋'}</span>
@@ -587,8 +593,11 @@ function ChatListItem({ conv }: { conv: ConversationSummary }) {
         <div className="flex-1 min-w-0">
           <div className="flex justify-between items-baseline gap-2">
             <span className="font-medium text-[15px] truncate">{conv.other?.displayName ?? 'Unknown'}</span>
-            <span className={`text-[11px] shrink-0 ${conv.unread ? 'text-[var(--wa-green-hover)]' : 'text-[var(--wa-text-2)]'}`}>
-              {conv.lastMessage?.at ? timeAgo(conv.lastMessage.at) : ''}
+            <span className="flex items-center gap-1 shrink-0">
+              {conv.pinned && <Pin size={11} className="text-[var(--wa-green-hover)]" />}
+              <span className={`text-[11px] ${conv.unread ? 'text-[var(--wa-green-hover)]' : 'text-[var(--wa-text-2)]'}`}>
+                {conv.lastMessage?.at ? timeAgo(conv.lastMessage.at) : ''}
+              </span>
             </span>
           </div>
           <div className="flex justify-between items-center gap-2">

@@ -15,7 +15,6 @@ export interface UserDoc extends mongoose.Document {
   anonymousMode: boolean;
   blockedUserIds: mongoose.Types.ObjectId[];
   mutedUserIds: mongoose.Types.ObjectId[];
-  noiseFilterLevel: number; // 0..3 — hides messages from low-reputation users
   createdAt: Date;
   updatedAt: Date;
 }
@@ -36,7 +35,6 @@ const UserSchema = new Schema<UserDoc>(
     anonymousMode: { type: Boolean, default: false },
     blockedUserIds: { type: [Schema.Types.ObjectId], default: [], ref: 'User' },
     mutedUserIds: { type: [Schema.Types.ObjectId], default: [], ref: 'User' },
-    noiseFilterLevel: { type: Number, default: 0, min: 0, max: 3 },
   },
   {
     timestamps: true,

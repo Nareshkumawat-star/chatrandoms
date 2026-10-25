@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  Search, MessageCircle, Lock, ArrowLeft, ShieldBan, VolumeX, X, UserSearch, ChevronLeft, Send, Smile, MoreVertical, Check, Plus, ShieldOff, Pencil, Trash2, Flag, Paperclip, Mic, Square, Play, Pause,
+  Search, MessageCircle, Lock, ArrowLeft, ShieldBan, VolumeX, X, UserSearch, ChevronLeft, Send, Smile, MoreVertical, Check, Plus, ShieldOff, Pencil, Trash2, Flag, Paperclip, Mic, Square, Play, Pause, Pin, PinOff, Archive, ArchiveRestore, ChevronDown, ChevronRight,
 } from 'lucide-react';
 import { api, apiError } from '../lib/api';
 import { getDmSocket } from '../lib/socket';
@@ -140,6 +140,7 @@ export default function Chats() {
   const [msgResults, setMsgResults] = useState<ChatMessage[]>([]);
   const [msgSearching, setMsgSearching] = useState(false);
   const [highlightId, setHighlightId] = useState<string | null>(null);
+  const [showArchived, setShowArchived] = useState(false);
 
   const endRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -279,6 +280,13 @@ export default function Chats() {
 
   // ---------- realtime DM events ----------
   useEffect(() => {
+    // A mention arriving for the conversation you're already viewing
+    // shouldn't leave a stale @badge on its chat-list row.
+    const onMention = (p: { conversationId: string }) => {
+      if (activeConv && p.conversationId === activeConv.id) {
+        useUi.getState().clearDmMentions(p.conversationId);
+      }
+    };
     const onNew = (m: ChatMessage) => {
       const isActive = activeConv && m.conversationId === activeConv.id;
       if (isActive) {
@@ -316,6 +324,7 @@ export default function Chats() {
     };
 
     dm.on('dm:new', onNew);
+    dm.on('dm:mention', onMention);
     dm.on('dm:typing', onTyping);
     dm.on('dm:stopTyping', onStop);
     dm.on('dm:edit', onEdit);
@@ -325,6 +334,7 @@ export default function Chats() {
 
     return () => {
       dm.off('dm:new', onNew);
+      dm.off('dm:mention', onMention);
       dm.off('dm:typing', onTyping);
       dm.off('dm:stopTyping', onStop);
       dm.off('dm:edit', onEdit);
@@ -351,6 +361,18 @@ export default function Chats() {
       setResults([]);
       openConversation({ id: data.conversation.id, other: data.conversation.other } as ConversationSummary);
     },
+    onError: (e) => setError(apiError(e)),
+  });
+
+  // Pin / archive a chat for THIS user only — the other participant keeps
+  // their own list order.
+  const setChatState = useMutation({
+    mutationFn: async (vars: { id: string; pinned?: boolean; archived?: boolean }) =>
+      (await api.patch(`/chats/${vars.id}/state`, {
+        pinned: vars.pinned,
+        archived: vars.archived,
+      })).data as { id: string; pinned: boolean; archived: boolean },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['chats'] }),
     onError: (e) => setError(apiError(e)),
   });
 
@@ -603,6 +625,72 @@ export default function Chats() {
   };
 
   const convItems = chatsQuery.data?.items ?? [];
+  const pinnedItems = convItems.filter((c) => c.pinned && !c.archived);
+  const regularItems = convItems.filter((c) => !c.pinned && !c.archived);
+  const archivedItems = convItems.filter((c) => c.archived);
+  const archivedUnread = archivedItems.reduce((n, c) => n + (c.unread || 0), 0);
+
+  // One row markup for all three groups; pin/archive controls appear on hover
+  // so the list stays quiet at rest.
+  const chatRow = (c: ConversationSummary) => (
+    <div
+      key={c.id}
+      className={`group wa-row-item rounded-lg relative ${activeConv?.id === c.id ? 'active' : ''} cursor-pointer`}
+      onClick={() => openConversation(c)}
+    >
+      <div className="flex items-center gap-3 px-3 py-2.5">
+        <Avatar src={c.other?.avatar || undefined} name={c.other?.displayName ?? '?'} size={49} online={c.other?.online} />
+        <div className="flex-1 min-w-0">
+          <div className="flex justify-between items-baseline gap-2">
+            <span className="font-medium text-[15px] truncate">{c.other?.displayName ?? 'Unknown'}</span>
+            <span className="flex items-center gap-1 shrink-0">
+              {c.pinned && !c.archived && <Pin size={11} className="text-[var(--wa-green-hover)]" />}
+              <span className={`text-[11px] ${c.unread ? 'text-[var(--wa-green-hover)]' : 'text-[var(--wa-text-2)]'}`}>
+                {c.lastMessage?.at ? timeAgo(c.lastMessage.at) : ''}
+              </span>
+            </span>
+          </div>
+          <div className="flex justify-between items-center gap-2">
+            <span className="text-[13px] text-[var(--wa-text-2)] truncate flex items-center gap-1">
+              {c.lastMessage?.mine && <Check size={14} className="shrink-0 text-[var(--wa-text-2)]" />}
+              {c.lastMessage ? c.lastMessage.text : 'New chat'}
+            </span>
+            {c.unread > 0 && (
+              <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-[var(--wa-green)] text-[#0b141a] text-[11px] font-bold flex items-center justify-center shrink-0">
+                {c.unread > 99 ? '99+' : c.unread}
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+      <div className="absolute right-1.5 top-1.5 flex items-center gap-0.5 rounded-full bg-[var(--wa-panel-2)] px-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition">
+        {!c.archived && (
+          <button
+            type="button"
+            className="p-1.5 rounded-full text-[var(--wa-text-2)] hover:text-[var(--wa-text)] hover:bg-[var(--wa-active)] transition cursor-pointer"
+            title={c.pinned ? 'Unpin chat' : 'Pin chat'}
+            onClick={(e) => {
+              e.stopPropagation();
+              setChatState.mutate({ id: c.id, pinned: !c.pinned });
+            }}
+          >
+            {c.pinned ? <PinOff size={13} /> : <Pin size={13} />}
+          </button>
+        )}
+        <button
+          type="button"
+          className="p-1.5 rounded-full text-[var(--wa-text-2)] hover:text-[var(--wa-text)] hover:bg-[var(--wa-active)] transition cursor-pointer"
+          title={c.archived ? 'Unarchive chat' : 'Archive chat'}
+          onClick={(e) => {
+            e.stopPropagation();
+            setChatState.mutate({ id: c.id, archived: !c.archived });
+          }}
+        >
+          {c.archived ? <ArchiveRestore size={13} /> : <Archive size={13} />}
+        </button>
+      </div>
+    </div>
+  );
 
   // group messages by day for date chips
   const grouped = useMemo(() => {
@@ -644,7 +732,7 @@ export default function Chats() {
               <input
                 autoFocus
                 className="bg-transparent outline-none text-[14px] w-full placeholder:text-[var(--wa-text-2)]"
-                placeholder="Search @username…"
+                placeholder="Search people by @username"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
               />
@@ -704,7 +792,7 @@ export default function Chats() {
           <Search size={15} className="text-[var(--wa-text-2)] shrink-0" />
           <input
             className="bg-transparent outline-none text-[14px] w-full placeholder:text-[var(--wa-text-2)]"
-            placeholder="Search username… e.g. @nareshk"
+            placeholder="Find someone by @username"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -771,36 +859,39 @@ export default function Chats() {
             </div>
           )
         ) : (
-          convItems.map((c) => (
-            <div
-              key={c.id}
-              className={`wa-row-item rounded-lg ${activeConv?.id === c.id ? 'active' : ''} cursor-pointer`}
-              onClick={() => openConversation(c)}
-            >
-              <div className="flex items-center gap-3 px-3 py-2.5">
-                <Avatar src={c.other?.avatar || undefined} name={c.other?.displayName ?? '?'} size={49} online={c.other?.online} />
-                <div className="flex-1 min-w-0">
-                  <div className="flex justify-between items-baseline gap-2">
-                    <span className="font-medium text-[15px] truncate">{c.other?.displayName ?? 'Unknown'}</span>
-                    <span className={`text-[11px] shrink-0 ${c.unread ? 'text-[var(--wa-green-hover)]' : 'text-[var(--wa-text-2)]'}`}>
-                      {c.lastMessage?.at ? timeAgo(c.lastMessage.at) : ''}
-                    </span>
-                  </div>
-                  <div className="flex justify-between items-center gap-2">
-                    <span className="text-[13px] text-[var(--wa-text-2)] truncate flex items-center gap-1">
-                      {c.lastMessage?.mine && <Check size={14} className="shrink-0 text-[var(--wa-text-2)]" />}
-                      {c.lastMessage ? c.lastMessage.text : 'New chat'}
-                    </span>
-                    {c.unread > 0 && (
-                      <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-[var(--wa-green)] text-[#0b141a] text-[11px] font-bold flex items-center justify-center shrink-0">
-                        {c.unread > 99 ? '99+' : c.unread}
-                      </span>
-                    )}
-                  </div>
+          <>
+            {pinnedItems.length > 0 && (
+              <>
+                <div className="flex items-center gap-1.5 px-3 pt-1 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--wa-text-2)]">
+                  <Pin size={11} /> Pinned
                 </div>
+                {pinnedItems.map(chatRow)}
+                {regularItems.length > 0 && <div className="my-1.5 mx-2 border-t border-[var(--wa-border)]" />}
+              </>
+            )}
+            {regularItems.map(chatRow)}
+            {archivedItems.length > 0 && (
+              <div className="mt-1">
+                <button
+                  type="button"
+                  className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-[13px] text-[var(--wa-text-2)] hover:bg-[var(--wa-active)] transition cursor-pointer"
+                  onClick={() => setShowArchived((v) => !v)}
+                  title={showArchived ? 'Hide archived chats' : 'Show archived chats'}
+                >
+                  {showArchived ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                  <Archive size={14} />
+                  <span className="font-medium">Archived</span>
+                  <span className="text-[12px]">· {archivedItems.length}</span>
+                  {archivedUnread > 0 && (
+                    <span className="ml-auto min-w-[18px] h-[18px] px-1 rounded-full bg-[var(--wa-green)] text-[#0b141a] text-[11px] font-bold flex items-center justify-center">
+                      {archivedUnread > 99 ? '99+' : archivedUnread}
+                    </span>
+                  )}
+                </button>
+                {showArchived && <div className="mt-0.5">{archivedItems.map(chatRow)}</div>}
               </div>
-            </div>
-          ))
+            )}
+          </>
         )}
       </div>
     </div>
@@ -874,7 +965,7 @@ export default function Chats() {
             <input
               autoFocus
               className="bg-transparent outline-none text-[13.5px] w-full placeholder:text-[var(--wa-text-2)]"
-              placeholder="Search in this conversation…"
+              placeholder="Search messages in this chat"
               value={msgQ}
               onChange={(e) => setMsgQ(e.target.value)}
             />
@@ -1255,7 +1346,7 @@ export default function Chats() {
                   ? "You can't message this user"
                   : activeConv.other?.isGuest
                     ? 'Guests cannot reply — invite them to register'
-                    : 'Type a message'
+                    : `Message ${activeConv.other?.displayName ?? 'this person'}…`
             }
             value={input}
             maxLength={4000}

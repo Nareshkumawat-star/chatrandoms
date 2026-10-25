@@ -214,7 +214,7 @@ export default function AuthPage() {
                   label="Username or email"
                   value={form.identifier}
                   onChange={(e) => setForm({ ...form, identifier: e.target.value })}
-                  placeholder="e.g. nareshk or you@mail.com"
+                  placeholder="Enter your username or email"
                   autoComplete="username"
                   disabled={busy}
                 />
@@ -223,7 +223,7 @@ export default function AuthPage() {
                   type={showPassword ? 'text' : 'password'}
                   value={form.password}
                   onChange={(e) => setForm({ ...form, password: e.target.value })}
-                  placeholder="••••••••"
+                  placeholder="Enter your password"
                   autoComplete="current-password"
                   disabled={busy}
                   rightElement={
@@ -247,7 +247,7 @@ export default function AuthPage() {
                   label="Username (unique)"
                   value={form.username}
                   onChange={(e) => setForm({ ...form, username: e.target.value })}
-                  placeholder="e.g. nareshk"
+                  placeholder="Choose a username, e.g. nareshk"
                   autoComplete="off"
                   disabled={busy}
                 />
@@ -255,7 +255,7 @@ export default function AuthPage() {
                   label="Display name"
                   value={form.displayName}
                   onChange={(e) => setForm({ ...form, displayName: e.target.value })}
-                  placeholder="e.g. Naresh Kumawat"
+                  placeholder="How others will see you"
                   disabled={busy}
                 />
                 <NeonInput
@@ -263,7 +263,7 @@ export default function AuthPage() {
                   type="email"
                   value={form.email}
                   onChange={(e) => setForm({ ...form, email: e.target.value })}
-                  placeholder="you@mail.com"
+                  placeholder="you@example.com"
                   autoComplete="email"
                   disabled={busy}
                 />
@@ -272,7 +272,7 @@ export default function AuthPage() {
                   type={showPassword ? 'text' : 'password'}
                   value={form.password}
                   onChange={(e) => setForm({ ...form, password: e.target.value })}
-                  placeholder="••••••••"
+                  placeholder="At least 8 characters"
                   autoComplete="new-password"
                   disabled={busy}
                   rightElement={
