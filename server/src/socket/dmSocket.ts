@@ -44,6 +44,54 @@ function messagePayload(doc: MessageDoc) {
 export function registerDmHandlers(io: Server, socket: Socket) {
   const nsp = io.of('/dm');
 
+  // Typing is tracked per user in the namespace so a fast stream of
+  // `dm:typing` emits doesn't flood the other participant before the
+  // debounce elapses. `dm:stopTyping` clears the timer (and the entry) so
+  // the indicator goes away as soon as the user stops typing.
+  // ---------- typing ----------
+  const typingUsers = new Map<string, NodeJS.Timeout>();
+
+  socket.on('dm:typing', async (raw: unknown) => {
+    const ctx = ctxOf(socket);
+    const body = (raw ?? {}) as { conversationId?: string };
+    const conv = await loadAuthorizedConversation(ctx.userId, String(body.conversationId));
+    if (!conv) return;
+    const receiverId = conv.participants.find((p) => String(p) !== ctx.userId);
+    if (!receiverId) return;
+
+    // Start the debounce timer and keep it alive for this user across rapid
+    // typing events. The same user entering the same chat in another tab
+    // cancels the previous entry, which never fires for either side.
+    const existing = typingUsers.get(ctx.userId);
+    if (existing) clearTimeout(existing);
+    typingUsers.set(ctx.userId, setTimeout(() => {
+      typingUsers.delete(ctx.userId);
+      nsp.to(`user:${String(receiverId)}`).emit('dm:typing', {
+        conversationId: String(conv._id),
+        userId: ctx.userId,
+      });
+    }, 2500));
+  });
+
+  socket.on('dm:stopTyping', async (raw: unknown) => {
+    const ctx = ctxOf(socket);
+    const body = (raw ?? {}) as { conversationId?: string };
+    const conv = await loadAuthorizedConversation(ctx.userId, String(body.conversationId));
+    if (!conv) return;
+    const receiverId = conv.participants.find((p) => String(p) !== ctx.userId);
+    if (!receiverId) return;
+
+    const existing = typingUsers.get(ctx.userId);
+    if (existing) {
+      clearTimeout(existing);
+      typingUsers.delete(ctx.userId);
+    }
+    nsp.to(`user:${String(receiverId)}`).emit('dm:stopTyping', {
+      conversationId: String(conv._id),
+      userId: ctx.userId,
+    });
+  });
+
   // ---------- send message ----------
   socket.on('dm:send', async (raw: unknown, ack?: (res: unknown) => void) => {
     const ctx = ctxOf(socket);

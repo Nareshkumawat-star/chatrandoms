@@ -297,13 +297,25 @@ export default function Chats() {
         qc.invalidateQueries({ queryKey: ['chats'] });
       }
     };
-    const onTyping = (p: { conversationId: string }) => {
-      if (activeConv && p.conversationId === activeConv.id) {
-        setOtherTyping(true);
-        setTimeout(() => setOtherTyping(false), 2500);
+    // Single source of truth for the typing indicator so it never flickers:
+    // the server debounces for 2.5s, and this map keeps one 2.5s client-side
+    // timer per conversation for cleanup if the server misses a stop.
+  const typingTimers = new Map<string, number>();
+  const onTyping = (p: { conversationId: string }) => {
+    if (activeConv && p.conversationId === activeConv.id) {
+      setOtherTyping(true);
+      const t = window.setTimeout(() => setOtherTyping(false), 2500);
+      typingTimers.set(p.conversationId, t);
+    }
+  };
+    const onStop = () => setOtherTyping(false);
+    const clearTypingTimer = (conversationId: string) => {
+      const t = typingTimers.get(conversationId);
+      if (t !== undefined) {
+        window.clearTimeout(t);
+        typingTimers.delete(conversationId);
       }
     };
-    const onStop = () => setOtherTyping(false);
     const onEdit = (m: ChatMessage) => {
       setMessages((prev) =>
         prev.map((x) => (x._id === m._id ? { ...x, text: m.text, mentions: m.mentions, isEdited: true } : x))
@@ -327,6 +339,14 @@ export default function Chats() {
     dm.on('dm:mention', onMention);
     dm.on('dm:typing', onTyping);
     dm.on('dm:stopTyping', onStop);
+    // Host side clears the incoming indicator; we keep only our outgoing
+    // debounce timers here so the indicator clears even if the server's
+    // stop notification is missed or delayed.
+    dm.on('dm:stopTyping', (p: { conversationId: string }) => {
+      if (activeConv && p.conversationId === activeConv.id) {
+        clearTypingTimer(p.conversationId);
+      }
+    });
     dm.on('dm:edit', onEdit);
     dm.on('dm:delete', onDelete);
     dm.on('dm:reaction', onReaction);
