@@ -1,5 +1,6 @@
 import type { Server, Socket } from 'socket.io';
 import { GlobalMessage } from '../models/GlobalMessage.js';
+import { Report } from '../models/moderation.js';
 import { User } from '../models/User.js';
 import { sanitizeText } from '../utils/text.js';
 import { resolveMentions } from '../utils/mentions.js';
@@ -136,9 +137,7 @@ export function registerGlobalHandlers(io: Server, socket: Socket) {
       if (!msg) return ack?.({ error: 'Message not found' });
 
       const uid = new (GlobalMessage.base.Types.ObjectId)(ctx.userId);
-      const existingIdx = msg.reactors.findIndex(
-        (r) => String(r.userId) === ctx.userId && r.emoji === emoji
-      );
+      const existingIdx = msg.reactors.findIndex((r) => String(r.userId) === ctx.userId && r.emoji === emoji);
       let removed = false;
       if (existingIdx >= 0) {
         msg.reactors.splice(existingIdx, 1);
@@ -164,6 +163,14 @@ export function registerGlobalHandlers(io: Server, socket: Socket) {
         by: ctx.userId,
         emoji,
         removed,
+      });
+
+      // Broadcast a first-class report event so the client can update its
+      // local row without an extra HTTP request.
+      nsp.emit('global:report', {
+        messageId: String(msg._id),
+        reportCount: msg.reportCount,
+        moderationStatus: msg.moderationStatus,
       });
       ack?.({ ok: true });
     } catch (err) {
@@ -240,11 +247,58 @@ export function registerGlobalHandlers(io: Server, socket: Socket) {
       msg.reactors = [];
       await msg.save();
 
+      // Deleting a message clears its reactions so no stale emoji stays live.
       nsp.emit('global:messageDeleted', { messageId: String(msg._id) });
+      nsp.emit('global:report', {
+        messageId: String(msg._id),
+        reportCount: msg.reportCount,
+        moderationStatus: msg.moderationStatus,
+      });
       ack?.({ ok: true });
     } catch (err) {
       logger.error('global:delete failed', err);
       ack?.({ error: 'Failed to delete' });
+    }
+  });
+
+  // ---------- report (opens a moderation case) ----------
+  // The client reports straight over the socket: this opens the same case the
+  // REST endpoint does, hides the message from the public feed and pushes the
+  // new state to every client via `global:report`.
+  socket.on('global:report', async (raw: unknown, ack?: (res: unknown) => void) => {
+    const ctx = ctxOf(socket);
+    try {
+      const body = (raw ?? {}) as { messageId?: string; reason?: string; details?: string };
+      if (!body.messageId) return ack?.({ error: 'Invalid report' });
+
+      const rl = hit(`greport:${ctx.userId}`, 5, 60_000);
+      if (!rl.ok) return ack?.({ error: 'Too many reports — try again shortly' });
+
+      const msg = await GlobalMessage.findOne({ _id: body.messageId, isDeleted: false });
+      if (!msg) return ack?.({ error: 'Message not found' });
+      if (msg.moderationStatus === 'open') return ack?.({ error: 'This message is already under review' });
+
+      await Report.create({
+        reporterId: ctx.userId as never,
+        targetType: 'global_message',
+        targetId: msg._id,
+        reason: sanitizeText(body.reason ?? 'inappropriate', 80) || 'inappropriate',
+        details: sanitizeText(body.details ?? '', 500),
+      });
+
+      msg.reportCount = Math.max(1, msg.reportCount);
+      msg.moderationStatus = 'open';
+      await msg.save();
+
+      nsp.emit('global:report', {
+        messageId: String(msg._id),
+        reportCount: msg.reportCount,
+        moderationStatus: msg.moderationStatus,
+      });
+      ack?.({ ok: true, moderationStatus: 'open' });
+    } catch (err) {
+      logger.error('global:report failed', err);
+      ack?.({ error: 'Failed to report this message' });
     }
   });
 }

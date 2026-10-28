@@ -1,13 +1,23 @@
 import mongoose from 'mongoose';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { mkdirSync } from 'node:fs';
+import path from 'node:path';
 import { config } from '../config/env.js';
 import { logger } from './logger.js';
 import { User } from '../models/User.js';
 import { hashPassword } from './auth.js';
 
+let localMongod: ChildProcess | null = null;
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
 /**
- * Connect to MongoDB; in development, if the configured MongoDB is unreachable,
- * fall back to an embedded in-memory MongoDB so `npm run dev` works out of the box.
- * (Data in fallback mode is ephemeral — production should always use Atlas/real Mongo.)
+ * Connect to MongoDB. In development, if the configured MongoDB is unreachable,
+ * the server boots a bundled mongod against a data directory ON DISK, so
+ * accounts and chats survive a restart. Only if that also fails does it fall
+ * back to an ephemeral in-memory database (data lost on restart).
+ *
+ * Production never falls back — it aborts instead.
  */
 export async function connectDatabase(): Promise<void> {
   try {
@@ -20,14 +30,81 @@ export async function connectDatabase(): Promise<void> {
       throw err;
     }
     logger.warn(`MongoDB not reachable at ${config.mongoUri} (${(err as Error).message})`);
+    await mongoose.disconnect().catch(() => undefined);
   }
 
-  logger.warn('⚠ Falling back to in-memory MongoDB (dev only — data will be lost on restart)');
+  if (!process.env.DEV_MONGO_DISABLE) {
+    const uri = await startPersistentLocalMongod();
+    if (uri) {
+      logger.info(`Dev MongoDB ready: ${uri} (data in .data/mongo — accounts and chats are kept across restarts)`);
+      await seedDemoUsers();
+      return;
+    }
+  }
+
+  logger.warn('⚠ Falling back to in-memory MongoDB (dev only — accounts and chats are LOST when the server restarts)');
   const { MongoMemoryServer } = await import('mongodb-memory-server');
   const mongod = await MongoMemoryServer.create({ instance: { ip: '127.0.0.1', port: 0 } });
   await mongoose.connect(mongod.getUri('pulse-chat'));
   logger.info(`In-memory MongoDB ready: ${mongoose.connection.host}`);
   await seedDemoUsers();
+}
+
+/**
+ * Dev-only: launch the mongod binary that ships with mongodb-memory-server
+ * against a fixed, on-disk dbPath. Unlike MongoMemoryServer.create(), this
+ * keeps the data between runs.
+ */
+async function startPersistentLocalMongod(): Promise<string | null> {
+  const dbPath = process.env.DEV_MONGO_DB_PATH || path.resolve(process.cwd(), '.data/mongo');
+  const port = Number(process.env.DEV_MONGO_PORT) || 27017;
+  const uri = `mongodb://127.0.0.1:${port}/pulse-chat`;
+
+  try {
+    const { MongoBinary } = await import('mongodb-memory-server');
+    const binaryPath = await MongoBinary.getPath({});
+    mkdirSync(dbPath, { recursive: true });
+
+    const child = spawn(
+      binaryPath,
+      ['--dbpath', dbPath, '--port', String(port), '--bind_ip', '127.0.0.1'],
+      { stdio: 'ignore' }
+    );
+    localMongod = child;
+    child.on('exit', (code) => {
+      if (code && code !== 0) logger.warn(`Dev mongod exited with code ${code}`);
+      if (localMongod === child) localMongod = null;
+    });
+    child.on('error', (err) => logger.warn(`Dev mongod failed to start: ${err.message}`));
+
+    for (let i = 0; i < 40; i++) {
+      try {
+        await mongoose.connect(uri, { serverSelectionTimeoutMS: 1000 });
+        return uri;
+      } catch {
+        await mongoose.disconnect().catch(() => undefined);
+        await sleep(300);
+      }
+    }
+    logger.warn(`Dev mongod on port ${port} did not become ready`);
+  } catch (err) {
+    logger.warn('Could not start a bundled mongod for dev persistence', (err as Error).message);
+  }
+
+  stopDevDatabase();
+  return null;
+}
+
+/** Shut the bundled dev mongod down cleanly so WiredTiger flushes to disk. */
+export function stopDevDatabase(): void {
+  const child = localMongod;
+  localMongod = null;
+  if (!child || child.killed) return;
+  try {
+    child.kill('SIGINT');
+  } catch {
+    /* already gone */
+  }
 }
 
 /**

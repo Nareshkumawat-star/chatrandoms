@@ -51,11 +51,13 @@ export default function GlobalChat() {
     queryFn: async () => (await api.get('/global/meta')).data as GlobalMeta,
     refetchInterval: 30_000,
   });
+  const [searchMode, setSearchMode] = useState<'latest' | 'trending' | 'questions'>('latest');
+  const onlineCount = metaQuery.data?.onlineCount ?? 0;
 
   // ---------- history + socket wiring ----------
   useEffect(() => {
     let cancelled = false;
-    api.get('/global/messages?limit=60')
+    api.get(`/global/messages?limit=60&mode=${searchMode}`)
       .then(({ data }) => {
         if (!cancelled) {
           const d = data as { messages: GMsg[]; nextBefore: string | null };
@@ -69,12 +71,13 @@ export default function GlobalChat() {
       setMessages((prev) => (prev.some((p) => p._id === m._id) ? prev : [...prev, m]));
       qc.invalidateQueries({ queryKey: ['global-meta'] });
     };
+    // Server is the single source of truth for reactions: it emits the full
+    // reactions + reactors arrays, so we replace the row. `removed` is true
+    // when THIS user just un-reacted — don't treat that as a new emoji drop.
     const onReaction = (p: {
       messageId: string; reactions: GMsg['reactions']; reactors: GMsg['reactors']; by: string; emoji: string; removed: boolean;
     }) => {
-      setMessages((prev) =>
-        prev.map((m) => (m._id === p.messageId ? { ...m, reactions: p.reactions, reactors: p.reactors } : m))
-      );
+      setMessages((prev) => prev.map((m) => (m._id === p.messageId ? { ...m, reactions: p.reactions, reactors: p.reactors } : m)));
       if (p.by !== me?.id && !p.removed) {
         const id = Date.now() + Math.random();
         setStorm((s) => [...s, { id, emoji: p.emoji, x: Math.random() * 80 + 10 }]);
@@ -120,6 +123,11 @@ export default function GlobalChat() {
     socket.on('global:messageDeleted', onDeleted);
     socket.on('global:typing', onTyping);
     socket.on('global:stopTyping', onStop);
+    socket.on('global:report', (p: { messageId: string; reportCount: number; moderationStatus: 'none' | 'open' | 'resolved' }) => {
+      setMessages((prev) => prev.map((m) =>
+        m._id === p.messageId ? { ...m, reportCount: p.reportCount, moderationStatus: p.moderationStatus } : m
+      ));
+    });
     socket.connect();
 
     return () => {
@@ -225,32 +233,10 @@ export default function GlobalChat() {
     setTtl(0);
   }, [input, editing, replyTo, ttl, anonymous, socket]);
 
+  // Optimistic update is owned entirely by the socket: the server emits the
+  // full `global:reaction` payload (reactions + reactors), and this handler
+  // replaces the row wholesale, so no client-local arithmetic here.
   const react = (m: GMsg, emoji: string) => {
-    setMessages((prev) =>
-      prev.map((msg) => {
-        if (msg._id !== m._id) return msg;
-        const mine = msg.reactors.find((r) => r.userId === me?.id);
-        let reactors = msg.reactors.filter((r) => r.userId !== me?.id);
-        let reactions = [...msg.reactions];
-        const bump = (e: string, d: number) => {
-          const idx = reactions.findIndex((r) => r.emoji === e);
-          if (idx >= 0) {
-            reactions[idx] = { emoji: e, count: reactions[idx].count + d };
-            if (reactions[idx].count <= 0) reactions = reactions.filter((r) => r.emoji !== e);
-          } else if (d > 0) {
-            reactions.push({ emoji: e, count: 1 });
-          }
-        };
-        if (mine?.emoji === emoji) {
-          bump(emoji, -1);
-        } else {
-          if (mine) bump(mine.emoji, -1);
-          bump(emoji, +1);
-          reactors.push({ userId: me!.id, emoji });
-        }
-        return { ...msg, reactions, reactors };
-      })
-    );
     socket.emit('global:reaction', { messageId: m._id, emoji });
   };
 
@@ -287,9 +273,29 @@ export default function GlobalChat() {
               {connected ? 'LIVE' : '…'}
             </span>
           </h1>
-          <p className="text-[11.5px] sm:text-[12px] text-[var(--wa-text-2)] flex items-center gap-1.5 truncate">
-            <span className="hidden min-[420px]:inline">{meta?.onlineCount ?? '—'} online · </span>one chat for the whole world
-          </p>
+          <div className="text-[11.5px] sm:text-[12px] text-[var(--wa-text-2)] flex items-center gap-1.5 truncate">
+            <span className="hidden min-[420px]:flex items-center gap-1 shrink-0">
+              <span className="w-2 h-2 rounded-full bg-green-500 inline-block" />
+              {onlineCount ?? '—'} online
+            </span>
+            <span className="text-[var(--wa-text-2)] hidden min-[420px]:inline">·</span>
+            <div className="flex items-center gap-1.5">
+              {(['latest', 'trending', 'questions'] as const).map((m) => (
+                <button
+                  key={m}
+                  className={`text-[11px] px-1.5 py-0.5 rounded-full transition cursor-pointer ${
+                    searchMode === m
+                      ? 'bg-[var(--wa-active)] text-[var(--wa-text)]'
+                      : 'text-[var(--wa-text-2)] hover:bg-[var(--wa-hover)] hover:text-[var(--wa-text)]'
+                  }`}
+                  title={m === 'trending' ? 'Trending now' : m === 'latest' ? 'Latest first' : 'Question mode'}
+                  onClick={() => setSearchMode(m)}
+                >
+                  {m === 'latest' ? 'Latest' : m === 'trending' ? '🔥 Trending' : 'Questions'}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
         <div className="ml-auto flex items-center gap-1 shrink-0">
           <button
@@ -379,10 +385,11 @@ export default function GlobalChat() {
                   mine={m.senderId === me?.id}
                   flash={highlightId === m._id}
                   onMention={(userId) => setProfileId(userId)}
-                  onReply={() => {
-                    setReplyTo(m);
+                  onReply={(userId) => {
+                    setReplyTo({ ...m, replyToId: m._id, senderId: userId });
                     inputRef.current?.focus();
                   }}
+                  onSearch={(q) => setSearchQ(q)}
                   onReact={(e) => react(m, e)}
                   onEdit={() => {
                     setEditing(m);
@@ -390,7 +397,7 @@ export default function GlobalChat() {
                     inputRef.current?.focus();
                   }}
                   onDelete={() => socket.emit('global:delete', { messageId: m._id })}
-                  onReport={() => api.post(`/global/messages/${m._id}/report`, { reason: 'inappropriate' }).catch((e) => setError(apiError(e)))}
+                  onReport={() => socket.emit('global:report', { messageId: m._id, reason: 'inappropriate' })}
                   onProfile={() => setProfileId(m.senderId)}
                 />
               ))}
@@ -509,11 +516,12 @@ export default function GlobalChat() {
 
 // ---------------- message row ----------------
 function GlobalMessageRow({
-  m, mine, flash, onMention, onReply, onReact, onEdit, onDelete, onReport, onProfile,
+  m, mine, flash, onMention, onReply, onSearch, onReact, onEdit, onDelete, onReport, onProfile,
 }: {
   m: GMsg; mine: boolean; flash?: boolean;
   onMention: (userId: string) => void;
-  onReply: () => void; onReact: (emoji: string) => void; onEdit: () => void;
+  onReply: (userId: string) => void; onSearch: (q: string) => void;
+  onReact: (emoji: string) => void; onEdit: () => void;
   onDelete: () => void; onReport: () => void; onProfile: () => void;
 }) {
   return (
@@ -544,7 +552,7 @@ function GlobalMessageRow({
           <span className="inline-block text-[10px] bg-violet-500/20 text-violet-300 px-1.5 py-0.5 rounded-full font-semibold mb-0.5">Question</span>
         )}
         <span className="text-[14.2px]">
-          {m.isDeleted ? <i className="opacity-60">🚫 This message was deleted</i> : renderMentions(m.text, m.mentions, onMention)}
+          {m.isDeleted ? <i className="opacity-60">🚫 This message was deleted</i> : renderMentions(m.text, m.mentions, onMention, onReply, onSearch)}
           {m.isEdited && !m.isDeleted && <span className="text-[11px] opacity-50 ml-1">edited</span>}
         </span>
         <span className="wa-meta">
@@ -552,11 +560,18 @@ function GlobalMessageRow({
           {new Date(m.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
         </span>
         {m.reactions.length > 0 && (
-          <div className="flex gap-1 mt-1">
+          <div className="text-[11px] text-[var(--wa-text-2)] mt-1 flex items-center gap-2">
+            <span className="text-[var(--wa-text-3)]">{m.reactions.reduce((acc, r) => acc + r.count, 0)}</span>
+            <span className="text-[var(--wa-text-2)]">reacted</span>
+          </div>
+        )}
+        {m.reactions.length > 0 && (
+          <div className="flex flex-wrap gap-1 mt-1">
             {m.reactions.map((r) => (
               <button
                 key={r.emoji}
                 className="text-[11px] bg-black/25 hover:bg-black/40 rounded-full px-1.5 leading-5"
+                title={`${r.emoji} ${r.count}`}
                 onClick={() => onReact(r.emoji)}
               >
                 {r.emoji}{r.count > 1 ? ` ${r.count}` : ''}
@@ -569,8 +584,11 @@ function GlobalMessageRow({
           {QUICK_EMOJIS.map((e) => (
             <button key={e} className="text-[13px] hover:scale-125 transition-transform px-0.5" onClick={() => onReact(e)}>{e}</button>
           ))}
+          <button className="text-[13px] text-[var(--wa-text-2)] hover:text-[var(--wa-green-hover)] hover:scale-125 transition-transform px-0.5" title="Search this message" onClick={() => onSearch(m.text.slice(0, 60))}>
+            <Search size={13} />
+          </button>
           <span className="w-px h-4 bg-[var(--wa-border)] mx-0.5" />
-          <button className="p-1 text-[var(--wa-text-2)] hover:text-sky-300" title="Reply" onClick={onReply}>
+          <button className="p-1 text-[var(--wa-text-2)] hover:text-sky-300" title="Reply" onClick={() => onReply(m.senderId)}>
             <CornerUpLeft size={12} />
           </button>
           {mine && (
@@ -595,7 +613,9 @@ function GlobalMessageRow({
 function renderMentions(
   text: string,
   mentions: GMsg['mentions'],
-  onMention: (userId: string) => void
+  onMention: (userId: string) => void,
+  onReply: (userId: string) => void,
+  onSearch: (q: string) => void,
 ) {
   const byHandle = new Map((mentions ?? []).map((x) => [x.username.toLowerCase(), x.userId]));
   return text.split(/(@[A-Za-z0-9_.]{2,30})/g).map((part, i) => {
@@ -603,14 +623,29 @@ function renderMentions(
     const uid = handle ? byHandle.get(handle) : undefined;
     if (!uid) return <span key={i}>{part}</span>;
     return (
-      <button
-        key={i}
-        className="mention cursor-pointer"
-        title={`View @${handle}`}
-        onClick={() => onMention(uid)}
-      >
-        {part}
-      </button>
+      <span key={i} className="flex items-center gap-1">
+        <button
+          className="mention cursor-pointer text-[var(--wa-text)] hover:text-[var(--wa-green-hover)]"
+          title={`View @${handle}`}
+          onClick={() => onMention(uid)}
+        >
+          {part}
+        </button>
+        <button
+          className="text-[10px] text-[var(--wa-text-2)] hover:text-[var(--wa-green-hover)] cursor-pointer"
+          title="Reply to @handle"
+          onClick={() => onReply(uid)}
+        >
+          <CornerUpLeft size={11} />
+        </button>
+        <button
+          className="text-[10px] text-[var(--wa-text-2)] hover:text-[var(--wa-green-hover)] cursor-pointer"
+          title="Search this message"
+          onClick={() => onSearch(part.slice(1))}
+        >
+          <Search size={10} />
+        </button>
+      </span>
     );
   });
 }

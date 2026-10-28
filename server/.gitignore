@@ -1,4 +1,6 @@
 
+# Local dev database (bundled mongod data — accounts/chats live here)
+.data/
+
 # Temp / test data (not committed)
-.tmp-reuse-a.cjs
 .mongo-reuse-probe/

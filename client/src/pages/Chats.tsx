@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  Search, MessageCircle, Lock, ArrowLeft, ShieldBan, VolumeX, X, UserSearch, ChevronLeft, Send, Smile, MoreVertical, Check, Plus, ShieldOff, Pencil, Trash2, Flag, Paperclip, Mic, Square, Play, Pause, Pin, PinOff, Archive, ArchiveRestore, ChevronDown, ChevronRight,
+  Search, MessageCircle, Lock, ArrowLeft, ShieldBan, VolumeX, X, UserSearch, ChevronLeft, Send, Smile, MoreVertical, Check, Plus, ShieldOff, Pencil, Trash2, Flag, Paperclip, Mic, Square, Play, Pause, Pin, PinOff, Archive, ArchiveRestore, ChevronDown, ChevronRight, User,
 } from 'lucide-react';
 import { api, apiError } from '../lib/api';
 import { getDmSocket } from '../lib/socket';
@@ -136,6 +136,7 @@ export default function Chats() {
   const [sendingMedia, setSendingMedia] = useState(false);
   const [blockedState, setBlockedState] = useState<{ blockedMe: boolean; iBlocked: boolean }>({ blockedMe: false, iBlocked: false });
   const [msgSearchOpen, setMsgSearchOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
   const [msgQ, setMsgQ] = useState('');
   const [msgResults, setMsgResults] = useState<ChatMessage[]>([]);
   const [msgSearching, setMsgSearching] = useState(false);
@@ -929,21 +930,20 @@ export default function Chats() {
           <Avatar src={activeConv.other?.avatar || undefined} name={activeConv.other?.displayName ?? '?'} size={40} online={activeConv.other?.online} />
           <div className="min-w-0 text-left">
             <div className="font-medium text-[15px] truncate">{activeConv.other?.displayName ?? 'Private chat'}</div>
-            <div className="text-[12px] text-[var(--wa-text-2)] truncate">
+            <div className="flex items-center gap-2 text-[12px] text-[var(--wa-text-2)] truncate">
+              <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${activeConv.other?.online ? 'bg-[var(--wa-green-hover)] animate-pulse' : 'bg-[var(--wa-text-3)]'}`} />
               {activeConv.other?.online ? (
                 <span className="text-[var(--wa-green-hover)]">online</span>
               ) : (
                 <>@{activeConv.other?.username ?? '…'} · offline</>
               )}
-              {otherTyping && <span className="text-[var(--wa-green-hover)]"> · typing…</span>}
+              {otherTyping && <span className="text-[var(--wa-green-hover)] flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-[var(--wa-green-hover)] animate-ping shrink-0" /> typing…</span>}
             </div>
           </div>
         </button>
         <div className="ml-auto flex items-center gap-1 text-[var(--wa-text-2)]">
           <button
-            className={`p-2 rounded-full transition cursor-pointer ${
-              msgSearchOpen ? 'bg-[var(--wa-active)] text-[var(--wa-text)]' : 'hover:bg-[var(--wa-active)] hover:text-[var(--wa-text)]'
-            }`}
+            className={`p-2 rounded-full transition cursor-pointer ${msgSearchOpen ? 'bg-[var(--wa-active)] text-[var(--wa-text)]' : 'hover:bg-[var(--wa-active)] hover:text-[var(--wa-text)]'}`}
             title="Search this chat"
             onClick={() => setMsgSearchOpen((o) => !o)}
           >
@@ -971,13 +971,64 @@ export default function Chats() {
           >
             <VolumeX size={18} />
           </button>
-          <button className="p-2 rounded-full hover:bg-[var(--wa-active)]" title="More" onClick={() => setProfileId(activeConv.other?.id ?? null)}>
-            <MoreVertical size={18} />
-          </button>
+          <div className="relative">
+            <button
+              className="p-2 rounded-full hover:bg-[var(--wa-active)]"
+              title="More options"
+              onClick={() => setMoreOpen((o) => !o)}
+            >
+              <MoreVertical size={18} />
+            </button>
+            {moreOpen && (
+              <div className="absolute right-0 top-10 z-50 min-w-[200px] bg-[var(--wa-panel-2)] border border-[var(--wa-border)] rounded-2xl shadow-2xl overflow-hidden"
+                style={{ pointerEvents: 'auto' }}
+              >
+                <div className="py-1">
+                  <button
+                    className="w-full text-left px-4 py-2 text-[14px] text-[var(--wa-text)] hover:bg-[var(--wa-active)] transition cursor-pointer"
+                    onClick={() => { setProfileId(activeConv.other?.id ?? null); setMoreOpen(false); }}
+                  >
+                    <User size={14} className="mr-2" />
+                    Profile
+                  </button>
+                  <button
+                    className="w-full text-left px-4 py-2 text-[14px] text-[var(--wa-text)] hover:bg-[var(--wa-active)] transition cursor-pointer"
+                    onClick={() => {
+                      if (!activeConv.other) return;
+
+                      setMoreOpen(false);
+
+                      api.post(`/users/${activeConv.other.id}/mute`)
+                        .then(() => setBlockedState((s) => ({ ...s, iBlocked: true })))
+                        .catch(() => undefined);
+                    }}
+                  >
+                    <VolumeX size={14} className="mr-2" />
+                    Mute
+                  </button>
+                  <button
+                    className="w-full text-left px-4 py-2 text-[14px] text-[var(--wa-text)] hover:bg-[var(--wa-active)] transition cursor-pointer"
+                    onClick={() => {
+                      if (!activeConv.other) return;
+
+                      setMoreOpen(false);
+
+                      api.post(`/users/${activeConv.other.id}/block`)
+                        .then(() => setBlockedState((s) => ({ ...s, iBlocked: true })))
+                        .catch(() => undefined);
+                    }}
+                  >
+                    <Lock size={14} className="mr-2" />
+                    Block
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
-      {/* search inside this conversation */}
+      {/* search inside this conversation */}      {/* search inside this conversation */}      {/* search inside this conversation */}
       {msgSearchOpen && (
         <div className="shrink-0 border-b border-[var(--wa-border)] bg-[var(--wa-panel-2)] px-3 py-2 z-30">
           <div className="flex items-center gap-2 wa-glass-input rounded-lg px-3 py-1.5">

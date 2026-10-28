@@ -8,8 +8,9 @@ import { validate, asyncHandler } from '../middleware/validate.js';
 import { ApiError } from '../middleware/errors.js';
 import { sanitizeText } from '../utils/text.js';
 import { resolveMentions } from '../utils/mentions.js';
-import { hit } from '../lib/rateLimiter.js';
+import { hit, penalize } from '../lib/rateLimiter.js';
 import { getOnlineCount, getIo } from '../services/presence.js';
+import { config } from '../config/env.js';
 import type { Request, Response } from 'express';
 
 const router = Router();
@@ -23,6 +24,7 @@ const feedQuery = z.object({
   before: z.string().max(40).optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
   mode: z.enum(['latest', 'trending', 'questions']).optional(),
+  tag: z.string().trim().min(1).max(60).optional(),
 });
 
 router.get(
@@ -33,8 +35,12 @@ router.get(
     const limit = Math.min(Number(req.query.limit ?? 50), 100);
     const mode = (req.query.mode as string) ?? 'latest';
     const before = (req.query.before as string) || null;
+    const tag = (req.query.tag as string) || null;
 
-    const filter: Record<string, unknown> = { isDeleted: false };
+    const filter: Record<string, unknown> = { isDeleted: false, moderationStatus: { $ne: 'open' } };
+    if (tag) {
+      filter.tag = tag;
+    }
     if (mode === 'questions') filter.kind = 'question';
     if (before) {
       const ts = Number(before);
@@ -67,6 +73,7 @@ const postSchema = z.object({
   replyToId: z.string().regex(/^[a-f\d]{24}$/i).optional(),
   ttlMinutes: z.number().int().min(0).max(1440).optional(),
   anonymous: z.boolean().optional(),
+  tag: z.string().trim().min(1).max(60).optional(),
 });
 
 router.post(
@@ -115,6 +122,7 @@ router.post(
       replySnapshot,
       mentions,
       expiresAt,
+      tag: req.body.tag?.trim() || null,
     });
 
     // Targeted @mention ping over the global namespace's personal rooms.
@@ -144,11 +152,89 @@ router.get(
   validate(searchQuery, 'query'),
   asyncHandler(async (req: Request, res: Response) => {
     const rx = new RegExp(escapeRegex(String(req.query.q).trim()), 'i');
-    const messages = await GlobalMessage.find({ isDeleted: false, text: rx })
+    const messages = await GlobalMessage.find({ isDeleted: false, moderationStatus: { $ne: 'open' }, text: rx })
       .sort({ createdAt: -1 })
       .limit(30)
-      .lean();
+      .lean() as any;
     res.json({ messages });
+  })
+);
+
+// ---------- REPORT GLOBAL MESSAGE (opens a moderation case) ----------
+const reportSchema = z.object({
+  reason: z.string().min(1).max(80),
+  details: z.string().max(500).optional(),
+  dismissReason: z.string().max(80).optional(), // admin resolves why
+});
+
+router.post(
+  '/messages/:messageId/report',
+  requireAuth,
+  validate(reportSchema),
+  asyncHandler(async (req: Request, res: Response) => {
+    const messageId = req.params.messageId;
+    if (!/^[a-f\d]{24}$/i.test(messageId)) throw new ApiError(400, 'Invalid message id');
+    const { reason, details, dismissReason } = req.body as z.infer<typeof reportSchema>;
+
+    const msg = await GlobalMessage.findOne({ _id: messageId, isDeleted: false });
+    if (!msg) throw new ApiError(404, 'Message not found');
+    if (msg.moderationStatus === 'open') throw new ApiError(409, 'This message is already under review');
+
+    await Report.create({
+      reporterId: req.userId as never,
+      targetType: 'global_message',
+      targetId: messageId as never,
+      reason: sanitizeText(reason, 80),
+      details: sanitizeText(details ?? '', 500),
+    });
+
+    await GlobalMessage.updateOne(
+      { _id: messageId },
+      { $set: { reportCount: 1, moderationStatus: 'open', moderationResolvedAt: msg.moderationResolvedAt ?? null } }
+    );
+
+    res.json({ ok: true, moderationStatus: 'open' });
+  })
+);
+
+// ---------- ADMIN RESOLVES A REPORTS MODERATION CASE ----------
+const dismissSchema = z.object({
+  dismissReason: z.string().max(80).optional(),
+});
+
+router.post(
+  '/messages/:messageId/dismiss',
+  requireAuth,
+  validate(dismissSchema),
+  asyncHandler(async (req: Request, res: Response) => {
+    // Only users with an admin key may dismiss. (See config.env adminKey.)
+    // An unset ADMIN_KEY must lock the endpoint down instead of matching the
+    // empty header a request sends by default.
+    if (!config.adminKey) {
+      throw new ApiError(503, 'Admin actions are not configured (set ADMIN_KEY)');
+    }
+    if (String(req.headers['x-admin-key'] ?? '') !== config.adminKey) {
+      throw new ApiError(403, 'Admin key required to dismiss reports');
+    }
+    const messageId = req.params.messageId;
+    if (!/^[a-f\d]{24}$/i.test(messageId)) throw new ApiError(400, 'Invalid message id');
+    const { dismissReason } = req.body as z.infer<typeof dismissSchema>;
+
+    const msg = await GlobalMessage.findOne({ _id: messageId, isDeleted: false });
+    if (!msg) throw new ApiError(404, 'Message not found');
+    if (msg.moderationStatus !== 'open') throw new ApiError(409, 'This message is not under review');
+
+    await GlobalMessage.updateOne(
+      { _id: messageId },
+      {
+        $set: {
+          moderationStatus: 'resolved',
+          moderationResolvedAt: dismissReason ? new Date() : null,
+        },
+      }
+    );
+
+    res.json({ ok: true, moderationStatus: 'resolved' });
   })
 );
 
@@ -161,15 +247,14 @@ router.get(
     const dateKey = now.toISOString().slice(0, 10);
 
     const challenge =
-      (await Challenge.findOne({ dateKey }).lean()) ??
-      ({ dateKey, text: dailyChallengeText(now), isAuto: true } as unknown as {
+      (await Challenge.findOne({ dateKey }).lean()) ?? ({ dateKey, text: dailyChallengeText(now), isAuto: true } as unknown as {
         dateKey: string;
         text: string;
         isAuto: boolean;
       });
 
     const [totalMessages, totalUsers, milestone] = await Promise.all([
-      GlobalMessage.countDocuments({ isDeleted: false }),
+      GlobalMessage.countDocuments({ isDeleted: false, moderationStatus: { $ne: 'open' } }),
       User.countDocuments({ isGuest: false }),
       Milestone.findOne().sort({ celebratedAt: -1 }).lean(),
     ]);
@@ -177,11 +262,16 @@ router.get(
     const nextMilestoneTarget = Math.max(100, Math.ceil((totalMessages + 1) / 100) * 100);
     const progress = Math.min(100, Math.round((totalMessages / nextMilestoneTarget) * 100));
 
-    const trending = await GlobalMessage.find({ isDeleted: false, kind: { $ne: 'challenge' } })
+    const trending = await GlobalMessage.find({ isDeleted: false, moderationStatus: { $ne: 'open' }, kind: { $ne: 'challenge' } })
       .sort({ score: -1, createdAt: -1 })
       .limit(5)
       .select('text score reactions kind')
-      .lean();
+      .lean() as any;
+
+    const tagCounts = await GlobalMessage.aggregate([
+      { $match: { isDeleted: false, moderationStatus: { $ne: 'open' } } },
+      { $group: { _id: '$tag', count: { $sum: 1 } } },
+    ]);
 
     res.json({
       onlineCount: getOnlineCount(),
@@ -191,47 +281,16 @@ router.get(
         ? { label: milestone.label, value: milestone.value, celebratedAt: milestone.celebratedAt }
         : null,
       nextMilestone: { target: nextMilestoneTarget, progress },
-      trending: trending.map((t) => ({
-        id: String(t._id),
-        text: t.text.slice(0, 80),
-        score: t.score,
-        reactions: t.reactions,
-        kind: t.kind,
-      })),
+      trending,
+      tagCounts: tagCounts.map((t: { _id: string; count: number }) => ({ tag: t._id, count: t.count })),
     });
   })
 );
 
+
 // ---------- REPORT GLOBAL MESSAGE ----------
-const reportSchema = z.object({
-  reason: z.string().min(1).max(80),
-  details: z.string().max(500).optional(),
-});
-
-router.post(
-  '/messages/:messageId/report',
-  requireAuth,
-  validate(reportSchema),
-  asyncHandler(async (req: Request, res: Response) => {
-    const messageId = req.params.messageId;
-    if (!/^[a-f\d]{24}$/i.test(messageId)) throw new ApiError(400, 'Invalid message id');
-    const { reason, details } = req.body as z.infer<typeof reportSchema>;
-
-    try {
-      await Report.create({
-        reporterId: req.userId as never,
-        targetType: 'global_message',
-        targetId: messageId as never,
-        reason: sanitizeText(reason, 80),
-        details: sanitizeText(details ?? '', 500),
-      });
-    } catch {
-      throw new ApiError(409, 'You already reported this message');
-    }
-
-    await GlobalMessage.updateOne({ _id: messageId }, { $inc: { reportCount: 1 } });
-    res.json({ ok: true });
-  })
-);
+// Note: only ONE route is registered for this path. The earlier handler that
+// opened a moderation case (and the admin `/dismiss` endpoint) is the one
+// kept here — an earlier duplicate that only incremented reportCount was removed.
 
 export default router;

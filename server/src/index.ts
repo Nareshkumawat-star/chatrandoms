@@ -14,8 +14,9 @@ import chatRoutes from './routes/chats.js';
 import messageRoutes from './routes/messages.js';
 import globalRoutes from './routes/global.js';
 import uploadRoutes from './routes/upload.js';
+import aiRoutes from './routes/ai.js';
 import { initSockets } from './socket/index.js';
-import { connectDatabase } from './lib/db.js';
+import { connectDatabase, stopDevDatabase } from './lib/db.js';
 import { getOnlineCount } from './services/presence.js';
 import { Challenge, dailyChallengeText } from './models/moderation.js';
 
@@ -71,6 +72,7 @@ async function main() {
   app.use('/api/messages', messageRoutes);
   app.use('/api/global', globalRoutes);
   app.use('/api/upload', uploadRoutes);
+  app.use('/api/ai', aiRoutes);  // AI service: summaries / smart replies / semantic search
 
   // Daily challenge upsert (deterministic per day)
   const today = new Date().toISOString().slice(0, 10);
@@ -93,6 +95,7 @@ async function main() {
     logger.info('Shutting down…');
     io.close();
     await mongoose.disconnect();
+    stopDevDatabase();
     process.exit(0);
   };
   process.on('SIGINT', shutdown);
