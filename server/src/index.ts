@@ -16,7 +16,7 @@ import globalRoutes from './routes/global.js';
 import uploadRoutes from './routes/upload.js';
 import aiRoutes from './routes/ai.js';
 import { initSockets } from './socket/index.js';
-import { connectDatabase, stopDevDatabase } from './lib/db.js';
+import { connectDatabase, stopDevDatabase, getDatabaseStatus } from './lib/db.js';
 import { getOnlineCount } from './services/presence.js';
 import { Challenge, dailyChallengeText } from './models/moderation.js';
 
@@ -58,11 +58,16 @@ async function main() {
   });
 
   app.get('/api/health', (_req, res) => {
+    const database = getDatabaseStatus();
+    // Surfacing `durable: false` makes an ephemeral (data-losing) database
+    // obvious at a glance instead of only in the startup log.
     res.json({
       ok: true,
       uptime: process.uptime(),
       online: getOnlineCount(),
       mongo: mongoose.connection.readyState === 1,
+      database,
+      persistent: database.durable,
     });
   });
 

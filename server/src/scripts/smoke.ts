@@ -61,6 +61,12 @@ async function main() {
     const res = await fetch('http://127.0.0.1:4399/api/health');
     const j = await res.json();
     assert(res.status === 200 && j.ok, 'health endpoint');
+    assert(
+      j.database?.mode === 'configured' &&
+        j.database.durable === true &&
+        j.persistent === j.database.durable,
+      'health reports database mode and durability'
+    );
   }
 
   // ---------- register two users ----------

@@ -9,6 +9,31 @@ import { hashPassword } from './auth.js';
 
 let localMongod: ChildProcess | null = null;
 
+export type DatabaseMode = 'configured' | 'dev-disk' | 'memory' | 'unknown';
+
+interface DatabaseState {
+  mode: DatabaseMode;
+  /** true when data survives a restart of this process */
+  durable: boolean;
+  detail: string;
+  dataPath?: string;
+}
+
+let dbState: DatabaseState = {
+  mode: 'unknown',
+  durable: false,
+  detail: 'database connection not established yet',
+};
+
+/** Snapshot of how the process is talking to MongoDB, for /api/health. */
+export function getDatabaseStatus() {
+  return {
+    ...dbState,
+    connected: mongoose.connection.readyState === 1,
+    host: mongoose.connection.host || null,
+  };
+}
+
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /**
@@ -22,6 +47,11 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 export async function connectDatabase(): Promise<void> {
   try {
     await mongoose.connect(config.mongoUri, { serverSelectionTimeoutMS: 3000 });
+    dbState = {
+      mode: 'configured',
+      durable: true,
+      detail: 'connected to the configured MONGODB_URI — data is persisted by that server',
+    };
     logger.info(`MongoDB connected: ${mongoose.connection.host}`);
     return;
   } catch (err) {
@@ -34,9 +64,15 @@ export async function connectDatabase(): Promise<void> {
   }
 
   if (!process.env.DEV_MONGO_DISABLE) {
-    const uri = await startPersistentLocalMongod();
-    if (uri) {
-      logger.info(`Dev MongoDB ready: ${uri} (data in .data/mongo — accounts and chats are kept across restarts)`);
+    const started = await startPersistentLocalMongod();
+    if (started) {
+      dbState = {
+        mode: 'dev-disk',
+        durable: true,
+        detail: `dev-only bundled mongod writing to disk at ${started.dbPath} — data survives restarts`,
+        dataPath: started.dbPath,
+      };
+      logger.info(`Dev MongoDB ready: ${started.uri} (data in ${started.dbPath} — accounts and chats are kept across restarts)`);
       await seedDemoUsers();
       return;
     }
@@ -46,6 +82,11 @@ export async function connectDatabase(): Promise<void> {
   const { MongoMemoryServer } = await import('mongodb-memory-server');
   const mongod = await MongoMemoryServer.create({ instance: { ip: '127.0.0.1', port: 0 } });
   await mongoose.connect(mongod.getUri('pulse-chat'));
+  dbState = {
+    mode: 'memory',
+    durable: false,
+    detail: '⚠ in-memory MongoDB — accounts and chats are LOST when the server restarts',
+  };
   logger.info(`In-memory MongoDB ready: ${mongoose.connection.host}`);
   await seedDemoUsers();
 }
@@ -55,7 +96,7 @@ export async function connectDatabase(): Promise<void> {
  * against a fixed, on-disk dbPath. Unlike MongoMemoryServer.create(), this
  * keeps the data between runs.
  */
-async function startPersistentLocalMongod(): Promise<string | null> {
+async function startPersistentLocalMongod(): Promise<{ uri: string; dbPath: string } | null> {
   const dbPath = process.env.DEV_MONGO_DB_PATH || path.resolve(process.cwd(), '.data/mongo');
   const port = Number(process.env.DEV_MONGO_PORT) || 27017;
   const uri = `mongodb://127.0.0.1:${port}/pulse-chat`;
@@ -80,7 +121,7 @@ async function startPersistentLocalMongod(): Promise<string | null> {
     for (let i = 0; i < 40; i++) {
       try {
         await mongoose.connect(uri, { serverSelectionTimeoutMS: 1000 });
-        return uri;
+        return { uri, dbPath };
       } catch {
         await mongoose.disconnect().catch(() => undefined);
         await sleep(300);
